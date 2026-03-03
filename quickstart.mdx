@@ -19,7 +19,7 @@ This guide walks you through deploying a complete Moodle LMS instance using ipMo
 
     ```bash
     # Option 1: Clone from repository
-    git clone <repository-url> /opt/moodleip
+    git clone https://github.com/intiinside/ipMoodle.git /opt/moodleip
     cd /opt/moodleip
 
     # Option 2: Download and extract
@@ -93,7 +93,7 @@ This guide walks you through deploying a complete Moodle LMS instance using ipMo
   <Step title="Access Moodle">
     Once deployment completes, you'll see:
 
-    ```
+    ```text
     --- ¡DESPLIEGUE FINALIZADO! ---
     Accede a: http://localhost
     Tus archivos están en: /opt/moodleip/html
@@ -160,7 +160,7 @@ docker compose ps
 
 You should see four containers:
 
-```
+```text
 NAME                IMAGE                    STATUS
 moodle_app          ipmoodle-app            Up
 moodle_cron         ipmoodle-cron           Up
@@ -214,7 +214,7 @@ services:
 
 After deployment, your directory structure looks like:
 
-```
+```text
 /opt/moodleip/
 ├── deploy.sh              # Deployment script
 ├── docker-compose.yml     # Service orchestration
