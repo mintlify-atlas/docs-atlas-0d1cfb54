@@ -1,0 +1,465 @@
+---
+title: "Service Breakdown"
+description: "Detailed documentation of each Docker service in the ipMoodle stack"
+---
+
+## Service Overview
+
+The ipMoodle stack consists of four Docker services, each with a specific role in the system. This page provides detailed information about each service's configuration, purpose, and dependencies.
+
+<CardGroup cols={2}>
+  <Card title="db" icon="database">
+    PostgreSQL 16 database server
+  </Card>
+  <Card title="app" icon="server">
+    PHP-FPM application processor
+  </Card>
+  <Card title="cron" icon="clock">
+    Automated task scheduler
+  </Card>
+  <Card title="web" icon="globe">
+    Nginx web server
+  </Card>
+</CardGroup>
+
+---
+
+## Database Service (db)
+
+The database service provides persistent data storage for Moodle using PostgreSQL 16.
+
+### Configuration
+
+```yaml
+db:
+  image: postgres:16-alpine
+  container_name: moodle_db
+  restart: always
+  environment:
+    POSTGRES_DB: ${DB_NAME}
+    POSTGRES_USER: ${DB_USER}
+    POSTGRES_PASSWORD: ${DB_PASS}
+  volumes:
+    - ./db_data:/var/lib/postgresql/data
+  networks:
+    - moodle-net
+```
+
+### Key Details
+
+<Accordion title="Image Information">
+**Image**: `postgres:16-alpine`
+
+Uses the official PostgreSQL 16 image based on Alpine Linux for minimal size and security. This version provides:
+- Latest PostgreSQL 16 features and performance improvements
+- Reduced image size (~80MB compressed vs ~140MB for Debian-based)
+- Alpine Linux security hardening
+</Accordion>
+
+<Accordion title="Environment Variables">
+- **POSTGRES_DB**: Database name created on first run
+- **POSTGRES_USER**: Superuser account for database access
+- **POSTGRES_PASSWORD**: Password for the superuser account
+
+All values are injected from the `.env` file for security.
+</Accordion>
+
+<Accordion title="Volume Mounts">
+**Host Path**: `./db_data`  
+**Container Path**: `/var/lib/postgresql/data`
+
+This volume persists all PostgreSQL data files, including:
+- Database tables and indexes
+- Transaction logs (WAL files)
+- Configuration files (`postgresql.conf`, `pg_hba.conf`)
+
+<Warning>
+Deleting the `db_data` directory will result in complete data loss. Always backup before removing.
+</Warning>
+</Accordion>
+
+<Accordion title="Networking">
+**Network**: `moodle-net` (bridge)  
+**Internal Port**: `5432` (default PostgreSQL port)  
+**External Access**: Not exposed to host
+
+The database is only accessible from within the Docker network, accessible by service name `db`.
+</Accordion>
+
+### Restart Policy
+
+**Policy**: `always`
+
+The container automatically restarts on:
+- Container failure or crash
+- Docker daemon restart
+- System reboot
+
+---
+
+## Application Service (app)
+
+The app service runs PHP-FPM to process Moodle's PHP code and handle business logic.
+
+### Configuration
+
+```yaml
+app:
+  build: .
+  container_name: moodle_app
+  restart: always
+  environment:
+    MOODLE_DB_TYPE: pgsql
+    MOODLE_DB_HOST: db
+    MOODLE_DB_NAME: ${DB_NAME}
+    MOODLE_DB_USER: ${DB_USER}
+    MOODLE_DB_PASSWORD: ${DB_PASS}
+    MOODLE_URL: ${SITE_URL}
+  volumes:
+    - ./html:/var/www/html
+    - ./moodledata:/var/www/moodledata
+  depends_on:
+    - db
+  networks:
+    - moodle-net
+```
+
+### Key Details
+
+<Accordion title="Custom Image Build">
+**Build Context**: `.` (root directory)  
+**Dockerfile**: `./Dockerfile`  
+**Base Image**: `php:8.2-fpm-alpine`
+
+The custom image includes:
+- PHP 8.2 with FPM (FastCGI Process Manager)
+- Moodle-required extensions: `intl`, `soap`, `zip`, `pgsql`, `pdo_pgsql`, `exif`, `opcache`, `bcmath`, `sockets`, `mbstring`, `sodium`
+- GD library with JPEG and FreeType support
+- Optimized PHP configuration for Moodle
+- Ghostscript for PDF generation
+- dcron for cron functionality
+
+See [Dockerfile reference](/architecture/services#dockerfile-details) for complete build process.
+</Accordion>
+
+<Accordion title="Environment Variables">
+- **MOODLE_DB_TYPE**: `pgsql` (PostgreSQL driver)
+- **MOODLE_DB_HOST**: `db` (service name, resolves via Docker DNS)
+- **MOODLE_DB_NAME**: Database name from `.env`
+- **MOODLE_DB_USER**: Database user from `.env`
+- **MOODLE_DB_PASSWORD**: Database password from `.env`
+- **MOODLE_URL**: Public-facing URL for Moodle site
+
+These variables are used during Moodle installation and can be referenced in `config.php`.
+</Accordion>
+
+<Accordion title="Volume Mounts">
+**Mount 1**: `./html:/var/www/html` (read-write)
+- Moodle application code
+- Installed plugins
+- Theme files
+- `config.php` configuration
+
+**Mount 2**: `./moodledata:/var/www/moodledata` (read-write)
+- User uploaded files
+- Cache data
+- Session storage
+- Temporary files
+
+<Info>
+Both volumes are shared with the `cron` service to ensure consistency.
+</Info>
+</Accordion>
+
+<Accordion title="Dependencies">
+**Depends On**: `db`
+
+Docker Compose ensures the database container starts before the app container. However, this doesn't guarantee the database is ready to accept connections.
+
+<Note>
+The deployment script (`deploy.sh`) includes a database readiness check before installing Moodle.
+</Note>
+</Accordion>
+
+### FastCGI Configuration
+
+The app service listens on port `9000` for FastCGI connections from Nginx:
+
+```nginx
+fastcgi_pass app:9000;
+```
+
+This port is internal to the Docker network and not exposed to the host.
+
+---
+
+## Cron Service (cron)
+
+A dedicated sidecar container that executes Moodle's scheduled maintenance tasks every minute.
+
+### Configuration
+
+```yaml
+cron:
+  build: .
+  container_name: moodle_cron
+  restart: always
+  command: sh -c "echo '*/1 * * * * /usr/local/bin/php /var/www/html/admin/cli/cron.php > /dev/null 2>&1' > /var/spool/cron/crontabs/www-data && crond -f -l 8"
+  volumes:
+    - ./html:/var/www/html
+    - ./moodledata:/var/www/moodledata
+  depends_on:
+    - app
+  networks:
+    - moodle-net
+```
+
+### Key Details
+
+<Accordion title="Custom Command">
+The container overrides the default entrypoint with a shell command that:
+
+1. Creates a crontab file for the `www-data` user
+2. Schedules Moodle's cron script to run every minute (`*/1 * * * *`)
+3. Redirects output to `/dev/null` to prevent log accumulation
+4. Starts `crond` in foreground mode (`-f`) with log level 8 (debug)
+
+```bash
+echo '*/1 * * * * /usr/local/bin/php /var/www/html/admin/cli/cron.php > /dev/null 2>&1' > /var/spool/cron/crontabs/www-data && crond -f -l 8
+```
+
+<Info>
+The `-f` flag keeps `crond` running in the foreground, which is required for Docker containers to remain active.
+</Info>
+</Accordion>
+
+<Accordion title="Why a Separate Container?">
+Using a dedicated cron container instead of running cron inside the app container provides:
+
+- **Isolation**: Cron failures don't affect PHP-FPM processing
+- **Scalability**: App containers can be scaled horizontally without duplicating cron jobs
+- **Monitoring**: Easier to monitor and restart cron independently
+- **Resource Management**: Separate CPU/memory limits for scheduled tasks
+</Accordion>
+
+<Accordion title="Shared Volumes">
+The cron container mounts the same volumes as the app container:
+
+```yaml
+- ./html:/var/www/html
+- ./moodledata:/var/www/moodledata
+```
+
+This ensures:
+- Access to Moodle code at `/var/www/html/admin/cli/cron.php`
+- Ability to read/write to `moodledata` for cache operations
+- Consistency with the main application environment
+</Accordion>
+
+<Accordion title="Cron Schedule">
+**Frequency**: Every 1 minute (`*/1 * * * *`)
+
+This matches Moodle's recommended cron frequency for optimal performance. The cron script handles:
+- Sending queued emails
+- Processing scheduled tasks
+- Cleaning up temporary files
+- Updating search indexes
+- Running plugin-specific maintenance
+
+<Warning>
+Running cron more frequently than every minute can cause performance issues if tasks overlap.
+</Warning>
+</Accordion>
+
+### Monitoring Cron Execution
+
+Check cron logs with:
+
+```bash
+docker logs moodle_cron
+```
+
+---
+
+## Web Service (web)
+
+The web service runs Nginx as a reverse proxy, handling HTTP requests and serving static files.
+
+### Configuration
+
+```yaml
+web:
+  image: nginx:alpine
+  container_name: moodle_web
+  restart: always
+  ports:
+    - "80:80"
+  volumes:
+    - ./html:/var/www/html:ro
+    - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+  depends_on:
+    - app
+  networks:
+    - moodle-net
+```
+
+### Key Details
+
+<Accordion title="Image Information">
+**Image**: `nginx:alpine`
+
+Official Nginx image based on Alpine Linux:
+- Lightweight (~24MB compressed)
+- Includes Nginx 1.25+ with HTTP/2 support
+- Production-ready with minimal attack surface
+</Accordion>
+
+<Accordion title="Port Mapping">
+**Host Port**: `80`  
+**Container Port**: `80`
+
+This is the only external port exposed by the entire stack. All web traffic enters through this port.
+
+<Info>
+For HTTPS support, you'll need to modify the port mapping and add SSL certificates. See [SSL/HTTPS Configuration](/advanced/ssl-https).
+</Info>
+</Accordion>
+
+<Accordion title="Volume Mounts">
+**Mount 1**: `./html:/var/www/html:ro` (read-only)
+- Nginx needs access to static files (CSS, JS, images)
+- Read-only mount improves security
+- Prevents accidental file modification via web server
+
+**Mount 2**: `./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro` (read-only)
+- Custom Nginx configuration for Moodle
+- Overrides default Nginx site configuration
+- Read-only to prevent container modifications
+</Accordion>
+
+<Accordion title="Nginx Configuration Highlights">
+The `default.conf` file includes Moodle-specific optimizations:
+
+```nginx
+# Large file uploads
+client_max_body_size 512M;
+
+# Longer timeout for slow PHP scripts
+fastcgi_read_timeout 300;
+
+# Slash arguments support (required by Moodle)
+try_files $uri $uri/ /index.php$is_args$args;
+
+# FastCGI proxy to app container
+fastcgi_pass app:9000;
+```
+
+See [Nginx Configuration](/configuration/nginx) for detailed documentation.
+</Accordion>
+
+### Request Routing
+
+Nginx routes requests based on file type:
+
+1. **Static Files** (CSS, JS, images): Served directly from `/var/www/html`
+2. **PHP Files**: Proxied to `app:9000` via FastCGI
+3. **Sensitive Paths**: Blocked (vendor, node_modules, .git)
+
+---
+
+## Dockerfile Details
+
+Both `app` and `cron` services are built from the same Dockerfile:
+
+```dockerfile
+FROM php:8.2-fpm-alpine
+
+# 1. Install system dependencies
+RUN apk add --no-cache \
+    git \
+    linux-headers \
+    oniguruma-dev \
+    libsodium-dev \
+    icu-dev \
+    libpng-dev \
+    libjpeg-turbo-dev \
+    freetype-dev \
+    libzip-dev \
+    libxml2-dev \
+    postgresql-dev \
+    zlib-dev \
+    shadow \
+    ghostscript \
+    dcron
+
+# 2. Configure GD library
+RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install -j$(nproc) gd
+
+# 3. Install PHP extensions
+RUN docker-php-ext-install -j$(nproc) \
+    intl soap zip pgsql pdo_pgsql exif opcache bcmath sockets mbstring sodium
+
+# 4. PHP configuration optimizations
+RUN { \
+    echo 'max_input_vars=5000'; \
+    echo 'memory_limit=512M'; \
+    echo 'upload_max_filesize=512M'; \
+    echo 'post_max_size=512M'; \
+    echo 'max_execution_time=600'; \
+} > /usr/local/etc/php/conf.d/moodle.ini
+
+# 5. Set correct UID/GID for www-data
+RUN usermod -u 82 www-data && groupmod -g 82 www-data
+
+WORKDIR /var/www/html
+```
+
+### Build Stages Explained
+
+<CardGroup cols={2}>
+  <Card title="Stage 1: Dependencies" icon="box">
+    Installs Alpine packages needed for PHP extensions and tools
+  </Card>
+  <Card title="Stage 2: GD Configuration" icon="image">
+    Configures GD library with JPEG and FreeType support for image manipulation
+  </Card>
+  <Card title="Stage 3: PHP Extensions" icon="puzzle-piece">
+    Compiles and installs all PHP extensions required by Moodle
+  </Card>
+  <Card title="Stage 4: PHP Tuning" icon="sliders">
+    Sets custom PHP.ini values optimized for Moodle workloads
+  </Card>
+</CardGroup>
+
+<Note>
+The UID/GID alignment (82) ensures consistent file permissions across containers and the host system.
+</Note>
+
+---
+
+## Service Communication
+
+All services communicate exclusively through the `moodle-net` network:
+
+```
+web:80 → app:9000 → db:5432
+         ↑
+       cron (shares filesystem)
+```
+
+This architecture ensures:
+- No direct database access from the internet
+- Centralized request handling through Nginx
+- Isolated cron execution without network exposure
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Network Details" icon="network-wired" href="/architecture/networking">
+    Learn about network topology and communication
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration/environment-variables">
+    Configure environment variables and settings
+  </Card>
+</CardGroup>

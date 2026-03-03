@@ -1,0 +1,307 @@
+---
+title: 'Backup & Restore'
+description: 'Backup strategies for volumes, database dumps, and disaster recovery'
+---
+
+## Overview
+
+A comprehensive backup strategy for ipMoodle includes three critical components: the Moodle codebase, user data files, and the PostgreSQL database. This guide covers backup and restore procedures for all components.
+
+## What to Backup
+
+ipMoodle stores data in three primary locations:
+
+<CardGroup cols={3}>
+  <Card title="Moodle Code" icon="code">
+    `./html` - Moodle application files, themes, and plugins
+  </Card>
+  <Card title="User Data" icon="folder">
+    `./moodledata` - Uploaded files, course content, user files
+  </Card>
+  <Card title="Database" icon="database">
+    `./db_data` - PostgreSQL data directory
+  </Card>
+</CardGroup>
+
+<Warning>
+All three components must be backed up together to ensure a consistent restore point. A database backup without corresponding moodledata files will result in broken file references.
+</Warning>
+
+## Full System Backup
+
+### Manual Backup
+
+<Steps>
+  <Step title="Enable maintenance mode">
+    Prevent changes during backup:
+    
+    ```bash
+    docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/maintenance.php --enable
+    ```
+  </Step>
+  
+  <Step title="Create database dump">
+    Export the PostgreSQL database:
+    
+    ```bash
+    docker exec moodle_db pg_dump -U moodle -d moodle -F c -f /tmp/moodle_backup.dump
+    docker cp moodle_db:/tmp/moodle_backup.dump ./backups/moodle_db_$(date +%Y%m%d_%H%M%S).dump
+    ```
+  </Step>
+  
+  <Step title="Backup volumes">
+    Archive the Moodle directories:
+    
+    ```bash
+    tar -czf ./backups/moodle_html_$(date +%Y%m%d_%H%M%S).tar.gz ./html
+    tar -czf ./backups/moodle_data_$(date +%Y%m%d_%H%M%S).tar.gz ./moodledata
+    ```
+  </Step>
+  
+  <Step title="Disable maintenance mode">
+    Resume normal operations:
+    
+    ```bash
+    docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/maintenance.php --disable
+    ```
+  </Step>
+</Steps>
+
+### Automated Backup Script
+
+Create a backup script for scheduled execution:
+
+```bash
+#!/bin/bash
+# backup_moodle.sh
+
+BACKUP_DIR="/opt/backups/moodle"
+DATE=$(date +%Y%m%d_%H%M%S)
+
+# Create backup directory
+mkdir -p $BACKUP_DIR
+
+# Enable maintenance mode
+docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/maintenance.php --enable
+
+# Database backup
+docker exec moodle_db pg_dump -U moodle -d moodle -F c -f /tmp/backup_$DATE.dump
+docker cp moodle_db:/tmp/backup_$DATE.dump $BACKUP_DIR/db_$DATE.dump
+docker exec moodle_db rm /tmp/backup_$DATE.dump
+
+# Volume backups
+tar -czf $BACKUP_DIR/html_$DATE.tar.gz -C /opt/moodleip ./html
+tar -czf $BACKUP_DIR/moodledata_$DATE.tar.gz -C /opt/moodleip ./moodledata
+
+# Disable maintenance mode
+docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/maintenance.php --disable
+
+# Remove backups older than 30 days
+find $BACKUP_DIR -type f -mtime +30 -delete
+
+echo "Backup completed: $DATE"
+```
+
+Make the script executable and schedule it:
+
+```bash
+chmod +x backup_moodle.sh
+
+# Add to crontab (daily at 2 AM)
+echo "0 2 * * * /opt/moodleip/backup_moodle.sh" | crontab -
+```
+
+<Info>
+The backup script automatically removes backups older than 30 days to manage disk space. Adjust the retention period based on your requirements.
+</Info>
+
+## Database-Only Backup
+
+For quick database snapshots without volume backups:
+
+```bash
+# Create backup
+docker exec moodle_db pg_dump -U moodle -d moodle > moodle_db_$(date +%Y%m%d).sql
+
+# Compressed backup
+docker exec moodle_db pg_dump -U moodle -d moodle | gzip > moodle_db_$(date +%Y%m%d).sql.gz
+```
+
+## Restore Procedures
+
+### Full System Restore
+
+<Steps>
+  <Step title="Stop all services">
+    ```bash
+    docker compose down
+    ```
+  </Step>
+  
+  <Step title="Restore volumes">
+    Extract backed-up volumes:
+    
+    ```bash
+    # Backup existing data (safety measure)
+    mv ./html ./html.old
+    mv ./moodledata ./moodledata.old
+    mv ./db_data ./db_data.old
+    
+    # Restore from backup
+    tar -xzf ./backups/moodle_html_TIMESTAMP.tar.gz
+    tar -xzf ./backups/moodle_data_TIMESTAMP.tar.gz
+    ```
+  </Step>
+  
+  <Step title="Restore database">
+    Start only the database container:
+    
+    ```bash
+    docker compose up -d db
+    
+    # Wait for database to be ready
+    sleep 10
+    
+    # Drop and recreate database
+    docker exec moodle_db psql -U moodle -c "DROP DATABASE IF EXISTS moodle;"
+    docker exec moodle_db psql -U moodle -c "CREATE DATABASE moodle;"
+    
+    # Restore from dump
+    docker cp ./backups/moodle_db_TIMESTAMP.dump moodle_db:/tmp/restore.dump
+    docker exec moodle_db pg_restore -U moodle -d moodle -F c /tmp/restore.dump
+    ```
+  </Step>
+  
+  <Step title="Start all services">
+    ```bash
+    docker compose up -d
+    ```
+  </Step>
+  
+  <Step title="Verify restoration">
+    Check that Moodle is accessible and data is intact:
+    
+    ```bash
+    docker logs moodle_app
+    docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/check_database_schema.php
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+Always verify your backups by performing test restores in a separate environment. A backup is only as good as your ability to restore from it.
+</Warning>
+
+### Database-Only Restore
+
+To restore just the database:
+
+```bash
+# From SQL dump
+docker exec -i moodle_db psql -U moodle -d moodle < moodle_db_backup.sql
+
+# From compressed dump
+gunzip -c moodle_db_backup.sql.gz | docker exec -i moodle_db psql -U moodle -d moodle
+
+# From custom format dump
+docker cp moodle_db_backup.dump moodle_db:/tmp/restore.dump
+docker exec moodle_db pg_restore -U moodle -d moodle -c /tmp/restore.dump
+```
+
+## Offsite Backup Storage
+
+### Using rsync for Remote Backups
+
+Sync backups to a remote server:
+
+```bash
+# Sync to remote server
+rsync -avz --delete /opt/backups/moodle/ user@backup-server:/backups/moodle/
+
+# Add to backup script
+echo "rsync -avz /opt/backups/moodle/ user@backup-server:/backups/moodle/" >> backup_moodle.sh
+```
+
+### Cloud Storage Integration
+
+<Accordion title="AWS S3">
+```bash
+# Install AWS CLI
+apt-get install awscli
+
+# Upload to S3
+aws s3 sync /opt/backups/moodle/ s3://your-bucket/moodle-backups/
+
+# Add to backup script
+echo "aws s3 sync /opt/backups/moodle/ s3://your-bucket/moodle-backups/" >> backup_moodle.sh
+```
+</Accordion>
+
+<Accordion title="Google Cloud Storage">
+```bash
+# Install gsutil
+curl https://sdk.cloud.google.com | bash
+
+# Upload to GCS
+gsutil -m rsync -r /opt/backups/moodle/ gs://your-bucket/moodle-backups/
+```
+</Accordion>
+
+## Backup Verification
+
+Regularly verify backup integrity:
+
+```bash
+# Test database dump
+docker exec moodle_db pg_restore --list /tmp/backup.dump
+
+# Verify archive integrity
+tar -tzf moodle_html_backup.tar.gz > /dev/null && echo "Archive OK"
+
+# Check backup size
+ls -lh /opt/backups/moodle/
+```
+
+## Disaster Recovery Checklist
+
+<Steps>
+  <Step title="Assess damage">
+    Determine what data was lost or corrupted
+  </Step>
+  
+  <Step title="Identify recovery point">
+    Choose the most recent clean backup
+  </Step>
+  
+  <Step title="Provision clean environment">
+    Ensure server has required resources and Docker installed
+  </Step>
+  
+  <Step title="Restore from backups">
+    Follow the full system restore procedure
+  </Step>
+  
+  <Step title="Verify data integrity">
+    Test critical functionality and check data consistency
+  </Step>
+  
+  <Step title="Update DNS if needed">
+    Point domain to new server if recovering on different hardware
+  </Step>
+  
+  <Step title="Monitor system">
+    Watch logs for errors and performance issues
+  </Step>
+</Steps>
+
+## Backup Best Practices
+
+<Card title="3-2-1 Rule" icon="shield-check">
+  - Keep **3** copies of your data
+  - Store copies on **2** different media types
+  - Keep **1** copy offsite
+</Card>
+
+<Note>
+For production environments, implement automated backups with at least daily frequency and store copies in geographically separate locations.
+</Note>

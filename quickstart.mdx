@@ -1,80 +1,350 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Deploy Moodle LMS in minutes with Docker Compose
 ---
 
-## Get started in three steps
+## Get Started in 5 Minutes
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide walks you through deploying a complete Moodle LMS instance using ipMoodle's automated deployment script.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  **Prerequisites**: Docker and Docker Compose installed on your system. See [Prerequisites](/deployment/prerequisites) for details.
+</Note>
+
+## Installation Steps
+
+<Steps>
+  <Step title="Clone or Download ipMoodle">
+    Get the ipMoodle source files to your server:
+
+    ```bash
+    # Option 1: Clone from repository
+    git clone <repository-url> /opt/moodleip
+    cd /opt/moodleip
+
+    # Option 2: Download and extract
+    mkdir -p /opt/moodleip
+    cd /opt/moodleip
+    # Extract your ipMoodle files here
+    ```
+  </Step>
+
+  <Step title="Configure Environment Variables">
+    Set your site URL and database credentials:
+
+    ```bash
+    export SITE_URL="http://localhost"
+    export DB_NAME="moodle"
+    export DB_USER="moodle"
+    export DB_PASS="moodle"
+    ```
+
+    <Warning>
+      For production deployments, use a strong password for `DB_PASS` and configure HTTPS. See [SSL/HTTPS Setup](/advanced/ssl-https).
+    </Warning>
+
+    The deployment script will automatically generate a `.env` file with these values:
+
+    ```bash
+    SITE_URL=http://localhost
+    DB_NAME=moodle
+    DB_USER=moodle
+    DB_PASS=moodle
+    ```
+  </Step>
+
+  <Step title="Run the Deployment Script">
+    Make the script executable and run it:
+
+    ```bash
+    chmod +x deploy.sh
+    ./deploy.sh
+    ```
+
+    The script performs three automated stages:
+
+    <CodeGroup>
+      ```bash Stage 1: Build Docker Image
+      # Construyendo Imagen Propia (Esto tomará unos minutos)
+      docker compose build
+      ```
+
+      ```bash Stage 2: Start Services
+      # Levantando Infraestructura
+      docker compose up -d
+      ```
+
+      ```bash Stage 3: Download Moodle
+      # Descargando Moodle 4.3 (Latest Stable)
+      docker compose exec -T app sh -c "curl -L https://download.moodle.org/download.php/direct/stable403/moodle-latest-403.tgz | tar xz --strip-components=1"
+      
+      # Asignando permisos correctos
+      docker compose exec -T app chown -R www-data:www-data /var/www/html
+      docker compose exec -T app chown -R www-data:www-data /var/www/moodledata
+      docker compose exec -T app chmod -R 755 /var/www/html
+      ```
+    </CodeGroup>
+
+    <Info>
+      The first build takes 3-5 minutes as Docker compiles PHP extensions. Subsequent builds use cached layers and are much faster.
+    </Info>
+  </Step>
+
+  <Step title="Access Moodle">
+    Once deployment completes, you'll see:
+
+    ```
+    --- ¡DESPLIEGUE FINALIZADO! ---
+    Accede a: http://localhost
+    Tus archivos están en: /opt/moodleip/html
+    ```
+
+    Open your browser and navigate to your `SITE_URL`. You'll see the Moodle installation wizard.
+  </Step>
+
+  <Step title="Complete Moodle Setup">
+    Follow the Moodle web installer:
+
+    1. **Choose language**: Select your preferred language
+    2. **Database configuration**: Use these values:
+       - Database type: `PostgreSQL`
+       - Host: `db`
+       - Database name: Value of `DB_NAME` (default: `moodle`)
+       - Username: Value of `DB_USER` (default: `moodle`)
+       - Password: Value of `DB_PASS` (default: `moodle`)
+    3. **Confirm paths**:
+       - Web address: Your `SITE_URL`
+       - Moodle directory: `/var/www/html`
+       - Data directory: `/var/www/moodledata`
+    4. **Create admin account**: Set up your Moodle administrator credentials
+    5. **Site configuration**: Configure site name, description, and settings
+
+    <Note>
+      The database host is `db` (not `localhost`) because it references the Docker Compose service name.
+    </Note>
+  </Step>
+</Steps>
+
+## What Just Happened?
+
+The deployment script automated the following:
+
+<CardGroup cols={2}>
+  <Card title="Environment File" icon="file">
+    Generated `.env` with your configuration variables
+  </Card>
+  <Card title="Docker Image" icon="docker">
+    Built custom PHP 8.2-FPM image with Moodle extensions
+  </Card>
+  <Card title="Four Containers" icon="box">
+    Started database, app, cron, and web services
+  </Card>
+  <Card title="Moodle Code" icon="download">
+    Downloaded and extracted Moodle 4.3 into `./html`
+  </Card>
+  <Card title="Permissions" icon="lock">
+    Set correct ownership for www-data user
+  </Card>
+  <Card title="Network" icon="network-wired">
+    Created isolated `moodle-net` bridge network
+  </Card>
+</CardGroup>
+
+## Verify Your Deployment
+
+Check that all services are running:
+
+```bash
+docker compose ps
+```
+
+You should see four containers:
+
+```
+NAME                IMAGE                    STATUS
+moodle_app          ipmoodle-app            Up
+moodle_cron         ipmoodle-cron           Up
+moodle_db           postgres:16-alpine      Up
+moodle_web          nginx:alpine            Up
+```
+
+<Info>
+  All containers should show `Up` status. If any container is restarting, check logs with `docker compose logs <service>`.
+</Info>
+
+## Understanding the Stack
+
+Your Moodle instance runs on four interconnected services:
+
+```yaml
+services:
+  db:        # PostgreSQL 16 database
+  app:       # PHP-FPM application server
+  cron:      # Scheduled task runner
+  web:       # Nginx reverse proxy (port 80)
+```
+
+### Service Details
+
+**Database (db)**
+- Image: `postgres:16-alpine`
+- Data: Persisted to `./db_data`
+- Network: Internal `moodle-net`
+
+**Application (app)**
+- Image: Custom PHP 8.2-FPM build
+- Code: Mounted from `./html`
+- Uploads: Mounted to `./moodledata`
+- Environment: Database credentials from `.env`
+
+**Cron (cron)**
+- Image: Same as app container
+- Purpose: Runs Moodle's `admin/cli/cron.php` every minute
+- Command:
+  ```bash
+  echo '*/1 * * * * /usr/local/bin/php /var/www/html/admin/cli/cron.php > /dev/null 2>&1' > /var/spool/cron/crontabs/www-data && crond -f -l 8
+  ```
+
+**Web Server (web)**
+- Image: `nginx:alpine`
+- Ports: `80:80` (maps host port 80 to container)
+- Config: Custom FastCGI configuration from `nginx/default.conf`
+
+## File Structure
+
+After deployment, your directory structure looks like:
+
+```
+/opt/moodleip/
+├── deploy.sh              # Deployment script
+├── docker-compose.yml     # Service orchestration
+├── Dockerfile             # Custom PHP-FPM image
+├── .env                   # Generated environment variables
+├── nginx/
+│   └── default.conf      # Nginx configuration
+├── html/                  # Moodle code (auto-downloaded)
+├── moodledata/           # User uploads & cache
+└── db_data/              # PostgreSQL data
+```
+
+<Warning>
+  **Never delete `db_data` or `moodledata`** — they contain your database and user-uploaded files. Always back up these directories.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configure PHP Settings" icon="code" href="/configuration/php-settings">
+    Adjust memory limits, upload sizes, and execution timeouts
+  </Card>
+  <Card title="Set Up SSL/HTTPS" icon="lock" href="/advanced/ssl-https">
+    Secure your Moodle instance with TLS certificates
+  </Card>
+  <Card title="Backup & Restore" icon="database" href="/operations/backup-restore">
+    Learn how to protect your data with regular backups
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Monitor container health and resource usage
+  </Card>
+</CardGroup>
+
+## Common Commands
+
+<CodeGroup>
+  ```bash View Logs
+  # All services
+  docker compose logs -f
+
+  # Specific service
+  docker compose logs -f app
+  docker compose logs -f db
+  ```
+
+  ```bash Restart Services
+  # All services
+  docker compose restart
+
+  # Specific service
+  docker compose restart app
+  ```
+
+  ```bash Stop Services
+  # Stop all containers (preserves data)
+  docker compose down
+
+  # Stop and remove volumes (deletes data!)
+  docker compose down -v
+  ```
+
+  ```bash Execute Commands
+  # Access app container shell
+  docker compose exec app sh
+
+  # Run Moodle CLI commands
+  docker compose exec app php /var/www/html/admin/cli/maintenance.php --enable
+  ```
+</CodeGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Port 80 already in use">
+    If another service is using port 80, modify `docker-compose.yml`:
+
+    ```yaml
+    web:
+      ports:
+        - "8080:80"  # Change host port to 8080
+    ```
+
+    Then access Moodle at `http://localhost:8080`.
+  </Accordion>
+
+  <Accordion title="Moodle shows blank page">
+    Check PHP-FPM logs:
+
+    ```bash
+    docker compose logs app
+    ```
+
+    Common causes:
+    - Database connection failed (check `DB_*` variables)
+    - File permissions incorrect (run permission commands from deploy.sh)
+    - PHP fatal error (check logs for stack trace)
+  </Accordion>
+
+  <Accordion title="Database connection refused">
+    Ensure the database container is running:
+
+    ```bash
+    docker compose ps db
+    ```
+
+    Verify database credentials match in `.env` and Moodle config:
+
+    ```bash
+    cat .env
+    docker compose exec app cat /var/www/html/config.php | grep dbhost
+    ```
+  </Accordion>
+
+  <Accordion title="Cron not running">
+    Check the cron container logs:
+
+    ```bash
+    docker compose logs cron
+    ```
+
+    Verify the crontab is installed:
+
+    ```bash
+    docker compose exec cron cat /var/spool/cron/crontabs/www-data
+    ```
+
+    Expected output: `*/1 * * * * /usr/local/bin/php /var/www/html/admin/cli/cron.php`
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  For more detailed troubleshooting, see [Troubleshooting Guide](/operations/troubleshooting).
 </Note>

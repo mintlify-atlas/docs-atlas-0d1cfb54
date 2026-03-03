@@ -1,0 +1,347 @@
+---
+title: Installation
+description: Step-by-step guide to deploy ipMoodle using the automated deployment script
+---
+
+This guide walks you through deploying ipMoodle using the `deploy.sh` automation script.
+
+## Overview
+
+The deployment process consists of three main phases:
+
+1. **Environment setup** - Generates `.env` file with database credentials
+2. **Infrastructure deployment** - Builds Docker images and starts containers
+3. **Moodle installation** - Downloads and configures Moodle 4.3
+
+<Info>
+  The entire deployment process typically takes 5-10 minutes, depending on your internet connection and system resources.
+</Info>
+
+## Pre-Deployment Configuration
+
+### Set Required Environment Variable
+
+Before running the deployment script, configure your site URL:
+
+```bash
+export SITE_URL="https://your-domain.com"
+```
+
+<Warning>
+  The `SITE_URL` variable is **required**. The deployment script will use this value to configure Moodle's base URL.
+</Warning>
+
+### Optional: Customize Database Credentials
+
+The deployment script uses default database credentials. For production environments, you should customize these:
+
+```bash deploy.sh
+export DB_NAME="moodle"
+export DB_USER="moodle"
+export DB_PASS="moodle"  # Change this for production!
+```
+
+<Accordion title="Default Credentials">
+  By default, the script uses:
+  - **Database Name**: `moodle`
+  - **Database User**: `moodle`
+  - **Database Password**: `moodle`
+  
+  These are defined in `deploy.sh:5-7`.
+</Accordion>
+
+## Installation Steps
+
+<Steps>
+  <Step title="Navigate to the installation directory">
+    ```bash
+    cd /path/to/ipmoodle
+    ```
+  </Step>
+
+  <Step title="Make the deployment script executable">
+    ```bash
+    chmod +x deploy.sh
+    ```
+  </Step>
+
+  <Step title="Run the deployment script">
+    ```bash
+    ./deploy.sh
+    ```
+    
+    The script will execute the following operations automatically:
+    
+    <Accordion title="Phase 1: Environment Generation">
+      The script creates a `.env` file with your configuration:
+      
+      ```bash
+      cat <<EOF > .env
+      SITE_URL=$SITE_URL
+      DB_NAME=$DB_NAME
+      DB_USER=$DB_USER
+      DB_PASS=$DB_PASS
+      EOF
+      ```
+      
+      This file is used by Docker Compose to configure the containers.
+    </Accordion>
+    
+    <Accordion title="Phase 2: Building Docker Image">
+      ```bash
+      docker compose build
+      ```
+      
+      This builds the custom PHP-FPM image defined in the Dockerfile:
+      - Base image: `php:8.2-fpm-alpine`
+      - Installs Moodle-required PHP extensions
+      - Configures PHP settings (512M memory limit, 512M upload size)
+      - Sets up proper permissions for www-data user
+      
+      **Expected duration**: 3-5 minutes on first run
+    </Accordion>
+    
+    <Accordion title="Phase 3: Starting Infrastructure">
+      ```bash
+      docker compose up -d
+      ```
+      
+      This starts all services:
+      - **db**: PostgreSQL 16 database
+      - **app**: PHP-FPM application server
+      - **cron**: Automated task scheduler
+      - **web**: Nginx web server
+      
+      All containers start in detached mode (`-d` flag).
+    </Accordion>
+    
+    <Accordion title="Phase 4: Moodle Code Download">
+      If the `./html` directory is empty, the script automatically downloads Moodle:
+      
+      ```bash
+      docker compose exec -T app sh -c "curl -L https://download.moodle.org/download.php/direct/stable403/moodle-latest-403.tgz | tar xz --strip-components=1"
+      ```
+      
+      Then sets proper permissions:
+      
+      ```bash
+      docker compose exec -T app chown -R www-data:www-data /var/www/html
+      docker compose exec -T app chown -R www-data:www-data /var/www/moodledata
+      docker compose exec -T app chmod -R 755 /var/www/html
+      ```
+      
+      **Expected duration**: 2-3 minutes
+    </Accordion>
+  </Step>
+
+  <Step title="Verify deployment">
+    Check that all containers are running:
+    
+    ```bash
+    docker compose ps
+    ```
+    
+    You should see four containers:
+    - `moodle_db` (PostgreSQL)
+    - `moodle_app` (PHP-FPM)
+    - `moodle_cron` (Cron scheduler)
+    - `moodle_web` (Nginx)
+    
+    All should show status "Up".
+  </Step>
+
+  <Step title="Access Moodle installer">
+    Open your browser and navigate to the URL you configured:
+    
+    ```
+    http://your-domain.com
+    ```
+    
+    You'll be greeted by the Moodle installation wizard.
+  </Step>
+</Steps>
+
+## Deployment Script Breakdown
+
+Here's what happens when you run `deploy.sh`:
+
+```bash deploy.sh
+#!/bin/bash
+
+# Phase 1: Generate .env file
+echo "Generando entorno..."
+cat <<EOF > .env
+SITE_URL=$SITE_URL
+DB_NAME=$DB_NAME
+DB_USER=$DB_USER
+DB_PASS=$DB_PASS
+EOF
+
+# Phase 2: Build custom image
+echo "--- 1. Construyendo Imagen Propia (Esto tomará unos minutos) ---"
+docker compose build
+
+# Phase 3: Start all services
+echo "--- 2. Levantando Infraestructura ---"
+docker compose up -d
+
+# Phase 4: Download Moodle if needed
+echo "--- 3. Verificando Código Moodle ---"
+if [ -z "$(ls -A ./html)" ]; then
+    echo "Descargando Moodle 4.3 (Latest Stable)..."
+    docker compose exec -T app sh -c "curl -L https://download.moodle.org/download.php/direct/stable403/moodle-latest-403.tgz | tar xz --strip-components=1"
+    
+    echo "Asignando permisos correctos..."
+    docker compose exec -T app chown -R www-data:www-data /var/www/html
+    docker compose exec -T app chown -R www-data:www-data /var/www/moodledata
+    docker compose exec -T app chmod -R 755 /var/www/html
+else
+    echo "El código ya existe. Omitiendo descarga."
+fi
+
+echo -e "\n--- ¡DESPLIEGUE FINALIZADO! ---"
+echo "Accede a: $SITE_URL"
+echo "Tus archivos están en: /opt/moodleip/html"
+```
+
+## What Gets Created
+
+After deployment, your directory structure will look like this:
+
+```
+.
+├── deploy.sh
+├── docker-compose.yml
+├── Dockerfile
+├── .env                    # Generated during deployment
+├── html/                   # Moodle application files
+├── moodledata/             # Moodle data directory
+├── db_data/                # PostgreSQL database files
+└── nginx/
+    └── default.conf        # Nginx configuration
+```
+
+<Info>
+  All data is persisted in local directories, making backups and upgrades straightforward.
+</Info>
+
+## Container Services
+
+The deployment creates four interconnected containers:
+
+### Database Container
+
+```yaml docker-compose.yml
+db:
+  image: postgres:16-alpine
+  container_name: moodle_db
+  restart: always
+  environment:
+    POSTGRES_DB: ${DB_NAME}
+    POSTGRES_USER: ${DB_USER}
+    POSTGRES_PASSWORD: ${DB_PASS}
+  volumes:
+    - ./db_data:/var/lib/postgresql/data
+```
+
+### Application Container
+
+```yaml docker-compose.yml
+app:
+  build: .
+  container_name: moodle_app
+  restart: always
+  environment:
+    MOODLE_DB_TYPE: pgsql
+    MOODLE_DB_HOST: db
+    MOODLE_DB_NAME: ${DB_NAME}
+    MOODLE_DB_USER: ${DB_USER}
+    MOODLE_DB_PASSWORD: ${DB_PASS}
+    MOODLE_URL: ${SITE_URL}
+  volumes:
+    - ./html:/var/www/html
+    - ./moodledata:/var/www/moodledata
+```
+
+### Cron Container
+
+```yaml docker-compose.yml
+cron:
+  build: .
+  container_name: moodle_cron
+  restart: always
+  command: sh -c "echo '*/1 * * * * /usr/local/bin/php /var/www/html/admin/cli/cron.php > /dev/null 2>&1' > /var/spool/cron/crontabs/www-data && crond -f -l 8"
+```
+
+<Note>
+  The cron container runs Moodle's maintenance tasks every minute, as recommended by Moodle documentation.
+</Note>
+
+### Web Container
+
+```yaml docker-compose.yml
+web:
+  image: nginx:alpine
+  container_name: moodle_web
+  restart: always
+  ports:
+    - "80:80"
+  volumes:
+    - ./html:/var/www/html:ro
+    - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+```
+
+## Troubleshooting Installation
+
+### Port 80 Already in Use
+
+If port 80 is occupied:
+
+```bash
+# Check what's using port 80
+sudo netstat -tlnp | grep :80
+
+# Stop the conflicting service or modify docker-compose.yml
+# to use a different port (e.g., "8080:80")
+```
+
+### Permission Denied Errors
+
+Ensure your user is in the docker group:
+
+```bash
+sudo usermod -aG docker $USER
+# Log out and back in for changes to take effect
+```
+
+### Download Fails
+
+If Moodle download fails, check your internet connection and try manually:
+
+```bash
+docker compose exec app sh
+curl -L https://download.moodle.org/download.php/direct/stable403/moodle-latest-403.tgz -o /tmp/moodle.tgz
+tar xzf /tmp/moodle.tgz --strip-components=1 -C /var/www/html
+```
+
+### Containers Won't Start
+
+View container logs:
+
+```bash
+docker compose logs db
+docker compose logs app
+docker compose logs web
+```
+
+## Next Steps
+
+Once deployment is complete:
+
+1. Complete the Moodle web-based installation wizard
+2. Review [Configuration](/deployment/configuration) for post-installation setup
+3. Configure [SSL/HTTPS](/advanced/ssl-https) for production environments
+
+<Warning>
+  The default database password is insecure. Change it immediately for production deployments by modifying the `DB_PASS` variable in `deploy.sh` before running the script.
+</Warning>

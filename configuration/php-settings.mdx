@@ -1,0 +1,318 @@
+---
+title: PHP settings
+description: Optimize PHP configuration for Moodle performance
+---
+
+ipMoodle includes custom PHP settings optimized for Moodle's requirements. These settings are baked into the Docker image during build time via the `moodle.ini` configuration file.
+
+## Default PHP configuration
+
+The PHP settings are defined in the Dockerfile and written to `/usr/local/etc/php/conf.d/moodle.ini`:
+
+```dockerfile Dockerfile:30-36
+RUN { \
+    echo 'max_input_vars=5000'; \
+    echo 'memory_limit=512M'; \
+    echo 'upload_max_filesize=512M'; \
+    echo 'post_max_size=512M'; \
+    echo 'max_execution_time=600'; \
+} > /usr/local/etc/php/conf.d/moodle.ini
+```
+
+## Configuration parameters
+
+### max_input_vars
+
+<ParamField path="max_input_vars" type="integer" default="5000">
+  Maximum number of input variables allowed in a single request
+  
+  Moodle forms with many fields (like course settings or quiz configuration) require higher values than PHP's default (1000).
+  
+  **Recommended:** 5000 or higher for large Moodle installations
+</ParamField>
+
+### memory_limit
+
+<ParamField path="memory_limit" type="string" default="512M">
+  Maximum amount of memory a script can allocate
+  
+  Moodle's course backup, restore, and grade operations can be memory-intensive. The 512M limit handles most scenarios.
+  
+  **Increase to 1024M or higher if:**
+  - Backing up very large courses (1000+ students)
+  - Processing large CSV imports
+  - Running complex reports
+</ParamField>
+
+### upload_max_filesize
+
+<ParamField path="upload_max_filesize" type="string" default="512M">
+  Maximum size of an uploaded file
+  
+  Allows students and teachers to upload large files like videos, presentations, or course backups.
+  
+  **Note:** Must be coordinated with Nginx's `client_max_body_size` (also set to 512M)
+</ParamField>
+
+### post_max_size
+
+<ParamField path="post_max_size" type="string" default="512M">
+  Maximum size of POST data
+  
+  Must be equal to or greater than `upload_max_filesize` since file uploads are sent via POST requests.
+  
+  <Info>Set this slightly larger than `upload_max_filesize` to account for other form data</Info>
+</ParamField>
+
+### max_execution_time
+
+<ParamField path="max_execution_time" type="integer" default="600">
+  Maximum time in seconds a script can run before being terminated
+  
+  600 seconds (10 minutes) allows for long-running operations like:
+  - Course backups and restores
+  - Large file processing
+  - Quiz report generation
+  - Batch user enrollments
+  
+  **Coordinated with Nginx:** The Nginx `fastcgi_read_timeout` is set to 300 seconds
+</ParamField>
+
+## Modifying PHP settings
+
+### Option 1: Rebuild the Docker image
+
+For permanent changes, modify the Dockerfile:
+
+<Steps>
+  <Step title="Edit Dockerfile">
+    ```bash
+    nano Dockerfile
+    ```
+    
+    Modify lines 30-36 with your desired values:
+    
+    ```dockerfile
+    RUN { \
+        echo 'max_input_vars=10000'; \
+        echo 'memory_limit=1024M'; \
+        echo 'upload_max_filesize=1024M'; \
+        echo 'post_max_size=1024M'; \
+        echo 'max_execution_time=900'; \
+    } > /usr/local/etc/php/conf.d/moodle.ini
+    ```
+  </Step>
+  
+  <Step title="Rebuild and restart">
+    ```bash
+    docker compose build app
+    docker compose up -d --force-recreate app
+    ```
+  </Step>
+  
+  <Step title="Verify changes">
+    ```bash
+    docker compose exec app php -i | grep -E "memory_limit|upload_max_filesize"
+    ```
+  </Step>
+</Steps>
+
+### Option 2: Runtime configuration with volume mount
+
+For temporary testing without rebuilding:
+
+<Steps>
+  <Step title="Create local PHP ini file">
+    ```bash
+    mkdir -p ./php-config
+    cat > ./php-config/custom.ini <<EOF
+    memory_limit=1024M
+    upload_max_filesize=1024M
+    post_max_size=1024M
+    max_execution_time=900
+    max_input_vars=10000
+    EOF
+    ```
+  </Step>
+  
+  <Step title="Add volume mount to docker-compose.yml">
+    Edit the `app` service:
+    
+    ```yaml
+    app:
+      build: .
+      volumes:
+        - ./html:/var/www/html
+        - ./moodledata:/var/www/moodledata
+        - ./php-config/custom.ini:/usr/local/etc/php/conf.d/custom.ini:ro
+    ```
+  </Step>
+  
+  <Step title="Restart the container">
+    ```bash
+    docker compose restart app
+    ```
+  </Step>
+</Steps>
+
+## PHP extensions
+
+The Dockerfile installs all PHP extensions required by Moodle:
+
+```dockerfile Dockerfile:26-27
+RUN docker-php-ext-install -j$(nproc) \
+    intl soap zip pgsql pdo_pgsql exif opcache bcmath sockets mbstring sodium
+```
+
+### Installed extensions
+
+| Extension | Purpose |
+|-----------|---------|
+| `intl` | Internationalization support for multiple languages |
+| `soap` | Web services integration |
+| `zip` | Course backup/restore compression |
+| `pgsql` | PostgreSQL database driver |
+| `pdo_pgsql` | PDO driver for PostgreSQL |
+| `exif` | Image metadata reading |
+| `opcache` | PHP bytecode caching for performance |
+| `bcmath` | Arbitrary precision math for grading |
+| `sockets` | Network communication |
+| `mbstring` | Multi-byte string handling (UTF-8) |
+| `sodium` | Modern cryptography library |
+| `gd` | Image manipulation (configured lines 22-23) |
+
+### Opcache configuration
+
+Opcache is enabled by default in PHP 8.2-FPM. For production optimization, add opcache settings:
+
+```bash
+cat > ./php-config/opcache.ini <<EOF
+opcache.enable=1
+opcache.memory_consumption=256
+opcache.interned_strings_buffer=16
+opcache.max_accelerated_files=10000
+opcache.revalidate_freq=2
+opcache.fast_shutdown=1
+EOF
+```
+
+Mount this file and restart the app container.
+
+## Checking current configuration
+
+### View all PHP settings
+
+```bash
+docker compose exec app php -i
+```
+
+### Check specific settings
+
+```bash
+docker compose exec app php -r "echo ini_get('memory_limit') . PHP_EOL;"
+docker compose exec app php -r "echo ini_get('upload_max_filesize') . PHP_EOL;"
+docker compose exec app php -r "echo ini_get('max_execution_time') . PHP_EOL;"
+```
+
+### View loaded configuration files
+
+```bash
+docker compose exec app php --ini
+```
+
+Expected output:
+```
+Configuration File (php.ini) Path: /usr/local/etc/php
+Loaded Configuration File:         (none)
+Scan for additional .ini files in: /usr/local/etc/php/conf.d
+Additional .ini files parsed:      /usr/local/etc/php/conf.d/docker-php-ext-gd.ini,
+                                   /usr/local/etc/php/conf.d/docker-php-ext-intl.ini,
+                                   /usr/local/etc/php/conf.d/moodle.ini
+```
+
+## Performance tuning
+
+### PHP-FPM worker processes
+
+The default PHP-FPM configuration uses dynamic process management. For high-traffic sites, create a custom `www.conf`:
+
+```ini
+[www]
+pm = dynamic
+pm.max_children = 50
+pm.start_servers = 10
+pm.min_spare_servers = 5
+pm.max_spare_servers = 20
+pm.max_requests = 500
+```
+
+<Info>
+  Adjust `pm.max_children` based on available memory. Rule of thumb: `(Total RAM - RAM for other services) / average memory per PHP process`
+</Info>
+
+### Monitor PHP-FPM status
+
+Enable the status page in `www.conf`:
+
+```ini
+pm.status_path = /status
+```
+
+Then access it via:
+
+```bash
+docker compose exec app php-fpm -t  # Test configuration
+docker compose exec app env SCRIPT_NAME=/status SCRIPT_FILENAME=/status REQUEST_METHOD=GET cgi-fcgi -bind -connect 127.0.0.1:9000
+```
+
+## Troubleshooting
+
+<Accordion title="'Maximum execution time exceeded' errors">
+  1. Increase `max_execution_time` in Dockerfile
+  2. Increase Nginx `fastcgi_read_timeout` in `nginx/Default.conf`
+  3. Rebuild and restart both app and web containers
+  
+  ```bash
+  docker compose build app
+  docker compose up -d --force-recreate app web
+  ```
+</Accordion>
+
+<Accordion title="File upload fails with 'file too large'">
+  Check that all three values are aligned:
+  
+  1. PHP `upload_max_filesize` (Dockerfile:33)
+  2. PHP `post_max_size` (Dockerfile:34)
+  3. Nginx `client_max_body_size` (nginx/Default.conf:8)
+  
+  All should be set to the same value (512M by default).
+</Accordion>
+
+<Accordion title="Out of memory errors during course backup">
+  1. Increase `memory_limit` to 1024M or higher
+  2. Check available container memory: `docker stats moodle_app`
+  3. Consider increasing Docker resource limits if needed
+  
+  For very large courses, you may need to use Moodle's CLI backup:
+  
+  ```bash
+  docker compose exec app php /var/www/html/admin/cli/backup.php --courseid=123
+  ```
+</Accordion>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Nginx configuration" icon="nginx" href="/configuration/nginx">
+    Align web server timeouts and upload limits
+  </Card>
+  <Card title="Custom PHP extensions" icon="puzzle-piece" href="/advanced/custom-php-extensions">
+    Add additional PHP extensions
+  </Card>
+  <Card title="Performance monitoring" icon="chart-line" href="/operations/monitoring">
+    Monitor PHP-FPM performance
+  </Card>
+  <Card title="Database configuration" icon="database" href="/configuration/database">
+    Optimize PostgreSQL settings
+  </Card>
+</CardGroup>

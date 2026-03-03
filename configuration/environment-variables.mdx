@@ -1,0 +1,221 @@
+---
+title: Environment variables
+description: Configure ipMoodle deployment with environment variables
+---
+
+ipMoodle uses environment variables to configure the deployment without hardcoding values. The `deploy.sh` script generates a `.env` file that Docker Compose reads during container startup.
+
+## Core variables
+
+These variables are defined in `deploy.sh` and control the fundamental deployment settings:
+
+<ParamField path="SITE_URL" type="string" required>
+  The public URL where Moodle will be accessible
+  
+  **Example:** `https://eva.intiinside.com`
+  
+  **Default:** Must be set before running deploy.sh
+  
+  <Note>This URL is used in Moodle's configuration and email notifications</Note>
+</ParamField>
+
+<ParamField path="DB_NAME" type="string" required>
+  PostgreSQL database name
+  
+  **Default:** `moodle` (deploy.sh:5)
+  
+  Used by both the database container and Moodle application to connect to the correct database.
+</ParamField>
+
+<ParamField path="DB_USER" type="string" required>
+  PostgreSQL database username
+  
+  **Default:** `moodle` (deploy.sh:6)
+  
+  Credentials for Moodle to authenticate with PostgreSQL.
+</ParamField>
+
+<ParamField path="DB_PASS" type="string" required>
+  PostgreSQL database password
+  
+  **Default:** `moodle` (deploy.sh:7)
+  
+  <Warning>Change this default password for production deployments</Warning>
+</ParamField>
+
+## Docker Compose variables
+
+These variables are used in `docker-compose.yml` to configure services:
+
+### Database service (db)
+
+```yaml docker-compose.yml:8-10
+POSTGRES_DB: ${DB_NAME}
+POSTGRES_USER: ${DB_USER}
+POSTGRES_PASSWORD: ${DB_PASS}
+```
+
+PostgreSQL reads these standard environment variables during initialization to create the database and user.
+
+### Application service (app)
+
+```yaml docker-compose.yml:22-27
+MOODLE_DB_TYPE: pgsql
+MOODLE_DB_HOST: db
+MOODLE_DB_NAME: ${DB_NAME}
+MOODLE_DB_USER: ${DB_USER}
+MOODLE_DB_PASSWORD: ${DB_PASS}
+MOODLE_URL: ${SITE_URL}
+```
+
+<Note>
+  `MOODLE_DB_HOST: db` uses Docker's service discovery. The `db` service is automatically resolvable via Docker DNS.
+</Note>
+
+## Setting variables
+
+### Before deployment
+
+Edit `deploy.sh` before running it:
+
+```bash deploy.sh:3-7
+# --- CONFIGURACIÓN ---
+export SITE_URL="https://eva.intiinside.com"
+export DB_NAME="moodle"
+export DB_USER="moodle"
+export DB_PASS="moodle"
+```
+
+Uncomment and modify the `SITE_URL` line (line 4) with your actual domain.
+
+### After deployment
+
+If you need to change variables after initial deployment:
+
+<Steps>
+  <Step title="Edit the .env file">
+    Modify the generated `.env` file in your project root:
+    
+    ```bash
+    nano .env
+    ```
+  </Step>
+  
+  <Step title="Restart services">
+    Restart containers to pick up new values:
+    
+    ```bash
+    docker compose down
+    docker compose up -d
+    ```
+  </Step>
+  
+  <Step title="Update Moodle config">
+    If you changed `SITE_URL`, update Moodle's configuration:
+    
+    ```bash
+    docker compose exec app nano /var/www/html/config.php
+    ```
+    
+    Find and update the `$CFG->wwwroot` value.
+  </Step>
+</Steps>
+
+## Security best practices
+
+<Warning>
+  **Never commit `.env` files to version control.** Add `.env` to your `.gitignore` file.
+</Warning>
+
+<CardGroup cols={2}>
+  <Card title="Use strong passwords" icon="lock">
+    Generate secure passwords for `DB_PASS`:
+    
+    ```bash
+    openssl rand -base64 32
+    ```
+  </Card>
+  
+  <Card title="Restrict file permissions" icon="shield">
+    Limit access to the .env file:
+    
+    ```bash
+    chmod 600 .env
+    ```
+  </Card>
+  
+  <Card title="Use secrets management" icon="key">
+    For production, consider using Docker secrets or external secret managers instead of plain .env files.
+  </Card>
+  
+  <Card title="Separate environments" icon="server">
+    Maintain different .env files for development, staging, and production environments.
+  </Card>
+</CardGroup>
+
+## Verification
+
+Check that environment variables are correctly loaded in containers:
+
+```bash
+# Check app container environment
+docker compose exec app env | grep MOODLE
+
+# Check database container environment
+docker compose exec db env | grep POSTGRES
+```
+
+Expected output for app container:
+
+```
+MOODLE_DB_TYPE=pgsql
+MOODLE_DB_HOST=db
+MOODLE_DB_NAME=moodle
+MOODLE_DB_USER=moodle
+MOODLE_DB_PASSWORD=moodle
+MOODLE_URL=https://eva.intiinside.com
+```
+
+## Troubleshooting
+
+<Accordion title="Moodle shows 'Database connection failed'">
+  1. Verify environment variables are set correctly in `.env`
+  2. Check database credentials match between app and db services
+  3. Ensure database container is running: `docker compose ps db`
+  4. Check database logs: `docker compose logs db`
+</Accordion>
+
+<Accordion title="Wrong site URL in Moodle">
+  1. Update `SITE_URL` in `.env`
+  2. Edit `/var/www/html/config.php` inside the app container
+  3. Update `$CFG->wwwroot` to match your new URL
+  4. Restart services: `docker compose restart`
+</Accordion>
+
+<Accordion title=".env file not being read">
+  The `.env` file must be in the same directory as `docker-compose.yml`. Check:
+  
+  ```bash
+  ls -la .env
+  cat .env
+  ```
+  
+  Regenerate if needed by running the relevant section of `deploy.sh`.
+</Accordion>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="PHP settings" icon="php" href="/configuration/php-settings">
+    Configure PHP memory, upload limits, and timeouts
+  </Card>
+  <Card title="Nginx configuration" icon="nginx" href="/configuration/nginx">
+    Customize web server settings
+  </Card>
+  <Card title="Database tuning" icon="database" href="/configuration/database">
+    Optimize PostgreSQL performance
+  </Card>
+  <Card title="Security hardening" icon="shield-halved" href="/advanced/security">
+    Implement security best practices
+  </Card>
+</CardGroup>

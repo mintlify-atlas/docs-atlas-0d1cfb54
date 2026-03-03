@@ -1,0 +1,184 @@
+---
+title: Prerequisites
+description: System requirements and dependencies needed to deploy ipMoodle
+---
+
+Before deploying ipMoodle, ensure your system meets the following requirements.
+
+## System Requirements
+
+<Note>
+  ipMoodle is designed to run on Linux systems with Docker support. While it may work on other platforms, Linux is recommended for production deployments.
+</Note>
+
+### Hardware Requirements
+
+<Steps>
+  <Step title="Minimum Requirements">
+    - **CPU**: 2 cores
+    - **RAM**: 4GB (8GB recommended for production)
+    - **Disk Space**: 20GB minimum (for application and database storage)
+  </Step>
+  
+  <Step title="Recommended for Production">
+    - **CPU**: 4+ cores
+    - **RAM**: 8GB+
+    - **Disk Space**: 50GB+ (depending on expected content volume)
+  </Step>
+</Steps>
+
+## Required Software
+
+### Docker
+
+ipMoodle requires Docker to be installed on your system.
+
+<Info>
+  The deployment uses official Docker images:
+  - **PHP**: `php:8.2-fpm-alpine` (custom built)
+  - **PostgreSQL**: `postgres:16-alpine`
+  - **Nginx**: `nginx:alpine`
+</Info>
+
+**Minimum Docker version**: 20.10.0 or higher
+
+To check your Docker version:
+
+```bash
+docker --version
+```
+
+### Docker Compose
+
+Docker Compose is used to orchestrate the multi-container setup.
+
+**Minimum Docker Compose version**: 2.0.0 or higher
+
+To check your Docker Compose version:
+
+```bash
+docker compose version
+```
+
+<Warning>
+  Make sure you're using `docker compose` (Compose V2) and not the older `docker-compose` command. The deployment script uses the modern syntax.
+</Warning>
+
+## Network Requirements
+
+### Ports
+
+The following ports must be available on your host system:
+
+| Port | Service | Purpose |
+|------|---------|----------|
+| 80 | Nginx | HTTP web server |
+
+<Note>
+  If you plan to enable HTTPS, port 443 will also need to be available.
+</Note>
+
+### Internet Access
+
+During initial deployment, the system needs internet access to:
+
+- Download Docker images
+- Download Moodle 4.3 (Latest Stable) from official sources
+- Install PHP extensions and dependencies
+
+<Accordion title="Moodle Download Details">
+  The deployment script automatically downloads Moodle from:
+  ```
+  https://download.moodle.org/download.php/direct/stable403/moodle-latest-403.tgz
+  ```
+  This downloads Moodle version 4.3 (latest stable release).
+</Accordion>
+
+## PHP Extensions
+
+The custom Docker image includes the following PHP extensions required by Moodle:
+
+```dockerfile
+# Core PHP extensions
+intl soap zip pgsql pdo_pgsql exif opcache bcmath sockets mbstring sodium
+
+# GD library with support for
+gd --with-freetype --with-jpeg
+```
+
+### System Packages
+
+The Alpine-based image includes these system dependencies:
+
+- `git` - Version control
+- `ghostscript` - PDF processing
+- `dcron` - Cron job execution
+- `postgresql-dev` - PostgreSQL client libraries
+- `libsodium-dev`, `icu-dev`, `libpng-dev`, `libjpeg-turbo-dev`, `freetype-dev`, `libzip-dev`, `libxml2-dev`, `zlib-dev` - Development libraries
+
+## User Permissions
+
+The user running the deployment script needs:
+
+- Permission to execute `docker` commands
+- Write access to the installation directory (default: `/opt/moodleip/`)
+
+<Info>
+  The deployment script creates these directories:
+  - `./html` - Moodle application files
+  - `./moodledata` - Moodle data directory
+  - `./db_data` - PostgreSQL database files
+</Info>
+
+## Environment Variables
+
+You need to set the `SITE_URL` environment variable before running the deployment:
+
+```bash
+export SITE_URL="https://your-domain.com"
+```
+
+<Warning>
+  The `SITE_URL` must be set before running `deploy.sh`. This is the only required pre-deployment configuration.
+</Warning>
+
+## Pre-Installation Checklist
+
+Before proceeding to installation, verify:
+
+<Steps>
+  <Step title="Docker is installed and running">
+    ```bash
+    docker info
+    ```
+  </Step>
+  
+  <Step title="Docker Compose is available">
+    ```bash
+    docker compose version
+    ```
+  </Step>
+  
+  <Step title="Port 80 is available">
+    ```bash
+    sudo netstat -tlnp | grep :80
+    ```
+    This should return no results if the port is free.
+  </Step>
+  
+  <Step title="You have sufficient disk space">
+    ```bash
+    df -h
+    ```
+  </Step>
+  
+  <Step title="SITE_URL is configured">
+    ```bash
+    echo $SITE_URL
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Once all prerequisites are met, you can proceed to the [Installation](/deployment/installation) guide.
+</Note>

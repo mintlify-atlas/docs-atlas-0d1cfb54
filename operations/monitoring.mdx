@@ -1,0 +1,386 @@
+---
+title: 'Monitoring'
+description: 'Container health checks, log management, and system monitoring for ipMoodle'
+---
+
+## Overview
+
+Effective monitoring ensures your ipMoodle deployment runs smoothly and helps identify issues before they impact users. This page covers container health monitoring, log management, and performance tracking.
+
+## Container Health Monitoring
+
+### Checking Container Status
+
+View the status of all ipMoodle containers:
+
+```bash
+docker compose ps
+```
+
+Expected output shows all containers as "running":
+
+```
+NAME           COMMAND                  SERVICE   STATUS    PORTS
+moodle_app     "docker-php-entrypoi…"   app       running   
+moodle_cron    "sh -c 'echo '*/1 * …"   cron      running   
+moodle_db      "docker-entrypoint.s…"   db        running   
+moodle_web     "/docker-entrypoint.…"   web       running   0.0.0.0:80->80/tcp
+```
+
+### Real-Time Container Monitoring
+
+<Steps>
+  <Step title="Monitor resource usage">
+    View CPU, memory, and network stats:
+    
+    ```bash
+    docker stats moodle_app moodle_db moodle_web moodle_cron
+    ```
+  </Step>
+  
+  <Step title="Check container uptime">
+    See how long containers have been running:
+    
+    ```bash
+    docker ps --format "table {{.Names}}\t{{.Status}}"
+    ```
+  </Step>
+  
+  <Step title="Inspect container details">
+    View detailed container configuration:
+    
+    ```bash
+    docker inspect moodle_app
+    ```
+  </Step>
+</Steps>
+
+### Container Restart Policies
+
+All ipMoodle containers use `restart: always` to ensure automatic recovery:
+
+```yaml
+restart: always
+```
+
+<Info>
+Containers automatically restart after crashes or system reboots. Check restart counts to identify unstable containers: `docker inspect moodle_app | grep RestartCount`
+</Info>
+
+## Log Management
+
+### Viewing Container Logs
+
+<Accordion title="Application logs (PHP-FPM)">
+```bash
+# Tail logs in real-time
+docker logs -f moodle_app
+
+# View last 100 lines
+docker logs --tail 100 moodle_app
+
+# Show logs since specific time
+docker logs --since 1h moodle_app
+```
+</Accordion>
+
+<Accordion title="Web server logs (Nginx)">
+```bash
+# Access logs
+docker logs -f moodle_web
+
+# View only errors
+docker logs moodle_web 2>&1 | grep error
+```
+</Accordion>
+
+<Accordion title="Database logs (PostgreSQL)">
+```bash
+# Database logs
+docker logs -f moodle_db
+
+# Connection errors
+docker logs moodle_db | grep "connection"
+```
+</Accordion>
+
+<Accordion title="Cron execution logs">
+```bash
+# Monitor cron jobs
+docker logs -f moodle_cron
+
+# Check for cron errors
+docker logs moodle_cron | grep -i error
+```
+</Accordion>
+
+### Centralized Log Collection
+
+Export logs to files for analysis:
+
+```bash
+# Export all logs
+docker logs moodle_app > /var/log/moodle/app.log
+docker logs moodle_web > /var/log/moodle/web.log
+docker logs moodle_db > /var/log/moodle/db.log
+docker logs moodle_cron > /var/log/moodle/cron.log
+```
+
+### Log Rotation
+
+Prevent Docker logs from consuming too much disk space:
+
+```json
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  }
+}
+```
+
+Add this to `/etc/docker/daemon.json` and restart Docker:
+
+```bash
+sudo systemctl restart docker
+```
+
+<Warning>
+After modifying Docker daemon configuration, you must recreate containers for changes to take effect: `docker compose up -d --force-recreate`
+</Warning>
+
+## Moodle Application Logs
+
+### Accessing Moodle Logs
+
+Moodle stores detailed logs in the database and file system:
+
+```bash
+# View PHP error log
+docker exec moodle_app tail -f /var/log/php8/error.log
+
+# Check Moodle data directory for logs
+docker exec moodle_app ls -la /var/www/moodledata/
+```
+
+### Common Log Locations
+
+| Log Type | Location |
+|----------|----------|
+| PHP errors | `/var/log/php8/error.log` |
+| Moodle debug | `/var/www/moodledata/` (if file logging enabled) |
+| Nginx access | Container stdout |
+| Nginx error | Container stderr |
+| PostgreSQL | Container stdout |
+
+## Performance Monitoring
+
+### Database Performance
+
+Monitor PostgreSQL query performance:
+
+```bash
+# Active queries
+docker exec moodle_db psql -U moodle -d moodle -c "
+  SELECT pid, age(clock_timestamp(), query_start), usename, query 
+  FROM pg_stat_activity 
+  WHERE query != '<IDLE>' AND query NOT ILIKE '%pg_stat_activity%' 
+  ORDER BY query_start DESC;
+"
+
+# Database cache hit ratio
+docker exec moodle_db psql -U moodle -d moodle -c "
+  SELECT 
+    sum(heap_blks_read) as heap_read,
+    sum(heap_blks_hit)  as heap_hit,
+    sum(heap_blks_hit) / (sum(heap_blks_hit) + sum(heap_blks_read)) as cache_ratio
+  FROM pg_statio_user_tables;
+"
+
+# Table sizes
+docker exec moodle_db psql -U moodle -d moodle -c "
+  SELECT 
+    schemaname,
+    tablename,
+    pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
+  FROM pg_tables
+  WHERE schemaname = 'public'
+  ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC
+  LIMIT 10;
+"
+```
+
+### PHP-FPM Performance
+
+Check PHP-FPM process status:
+
+```bash
+# View PHP-FPM processes
+docker exec moodle_app ps aux | grep php-fpm
+
+# Check PHP configuration
+docker exec moodle_app php -i | grep -E "memory_limit|max_execution_time|upload_max_filesize"
+```
+
+### Disk Space Monitoring
+
+<Steps>
+  <Step title="Check volume disk usage">
+    ```bash
+    du -sh ./html ./moodledata ./db_data
+    ```
+  </Step>
+  
+  <Step title="Monitor moodledata growth">
+    ```bash
+    # Detailed breakdown
+    du -h --max-depth=1 ./moodledata | sort -hr
+    
+    # Find largest files
+    find ./moodledata -type f -size +100M -exec ls -lh {} \;
+    ```
+  </Step>
+  
+  <Step title="Database size tracking">
+    ```bash
+    docker exec moodle_db psql -U moodle -d moodle -c "
+      SELECT pg_size_pretty(pg_database_size('moodle')) AS database_size;
+    "
+    ```
+  </Step>
+</Steps>
+
+## Network Monitoring
+
+### Container Network Connectivity
+
+Verify network communication between containers:
+
+```bash
+# Test app to database connection
+docker exec moodle_app nc -zv db 5432
+
+# Test web to app connection
+docker exec moodle_web nc -zv app 9000
+
+# Inspect network
+docker network inspect moodleip_moodle-net
+```
+
+### Port Accessibility
+
+Check if Nginx is accessible from the host:
+
+```bash
+# Local check
+curl -I http://localhost
+
+# External check (replace with your domain)
+curl -I http://your-domain.com
+```
+
+## Health Check Scripts
+
+### Automated Health Monitoring
+
+Create a health check script:
+
+```bash
+#!/bin/bash
+# health_check.sh
+
+echo "=== ipMoodle Health Check ==="
+echo ""
+
+# Check container status
+echo "Container Status:"
+docker compose ps
+
+# Check disk space
+echo -e "\nDisk Usage:"
+df -h | grep -E "Filesystem|/opt/moodleip"
+
+# Check database connectivity
+echo -e "\nDatabase Connection:"
+docker exec moodle_app nc -zv db 5432 && echo "✓ Database reachable" || echo "✗ Database unreachable"
+
+# Check web server
+echo -e "\nWeb Server:"
+curl -s -o /dev/null -w "%{http_code}" http://localhost | grep -q 200 && echo "✓ Web server responding" || echo "✗ Web server not responding"
+
+# Check cron
+echo -e "\nCron Status:"
+docker ps | grep moodle_cron > /dev/null && echo "✓ Cron running" || echo "✗ Cron not running"
+
+# Resource usage
+echo -e "\nResource Usage:"
+docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+```
+
+Make it executable:
+
+```bash
+chmod +x health_check.sh
+./health_check.sh
+```
+
+## Alerting
+
+### Email Alerts for Container Failures
+
+Set up monitoring with email notifications:
+
+```bash
+#!/bin/bash
+# monitor_containers.sh
+
+CONTAINERS=("moodle_app" "moodle_db" "moodle_web" "moodle_cron")
+EMAIL="admin@yourdomain.com"
+
+for container in "${CONTAINERS[@]}"; do
+  if ! docker ps | grep -q $container; then
+    echo "Container $container is down!" | mail -s "ipMoodle Alert: Container Down" $EMAIL
+  fi
+done
+```
+
+Schedule with cron:
+
+```bash
+# Check every 5 minutes
+*/5 * * * * /opt/moodleip/monitor_containers.sh
+```
+
+<Note>
+For production environments, consider using dedicated monitoring solutions like Prometheus, Grafana, or commercial services like Datadog or New Relic.
+</Note>
+
+## Metrics to Track
+
+<CardGroup cols={2}>
+  <Card title="System Metrics" icon="server">
+    - CPU usage per container
+    - Memory consumption
+    - Disk I/O
+    - Network throughput
+  </Card>
+  <Card title="Application Metrics" icon="chart-line">
+    - Request response time
+    - Database query performance
+    - Cron job execution time
+    - Error rates
+  </Card>
+  <Card title="Resource Metrics" icon="database">
+    - Database size growth
+    - moodledata volume size
+    - Active user sessions
+    - File upload counts
+  </Card>
+  <Card title="Availability Metrics" icon="circle-check">
+    - Container uptime
+    - HTTP response codes
+    - Database connection pool
+    - Failed login attempts
+  </Card>
+</CardGroup>

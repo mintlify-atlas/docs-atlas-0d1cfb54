@@ -1,0 +1,559 @@
+---
+title: "Network Architecture"
+description: "Network topology, port mappings, service discovery, and communication patterns in ipMoodle"
+---
+
+## Network Overview
+
+ipMoodle uses a single user-defined bridge network (`moodle-net`) to connect all services. This approach provides service discovery, isolation, and simplified communication between containers.
+
+<Info>
+User-defined bridge networks provide automatic DNS resolution, allowing containers to communicate using service names instead of IP addresses.
+</Info>
+
+## Network Configuration
+
+The network is defined in `docker-compose.yml`:
+
+```yaml
+networks:
+  moodle-net:
+    driver: bridge
+```
+
+### Network Driver: Bridge
+
+The bridge driver creates a private internal network on the Docker host:
+
+<CardGroup cols={2}>
+  <Card title="Isolation" icon="shield">
+    Containers on different networks cannot communicate
+  </Card>
+  <Card title="DNS Resolution" icon="magnifying-glass">
+    Service names automatically resolve to container IPs
+  </Card>
+  <Card title="Port Mapping" icon="network-wired">
+    Selective port exposure to host system
+  </Card>
+  <Card title="Subnet Management" icon="diagram-project">
+    Docker automatically manages IP allocation
+  </Card>
+</CardGroup>
+
+---
+
+## Service Connections
+
+All four services connect to the `moodle-net` network:
+
+```yaml
+services:
+  db:
+    networks:
+      - moodle-net
+  
+  app:
+    networks:
+      - moodle-net
+  
+  cron:
+    networks:
+      - moodle-net
+  
+  web:
+    networks:
+      - moodle-net
+```
+
+### Network Topology Diagram
+
+```
+                    ┌─────────────────────┐
+                    │   Host System       │
+                    │   (Port 80)         │
+                    └──────────┬──────────┘
+                               │
+                               │ Port Mapping
+                               │ 80:80
+                               │
+                    ┌──────────▼──────────┐
+                    │                     │
+                    │   moodle-net        │
+                    │   (Bridge Network)  │
+                    │                     │
+                    └─────────────────────┘
+                               │
+          ┌────────────────────┼────────────────────┐
+          │                    │                    │
+          │                    │                    │
+    ┌─────▼─────┐      ┌──────▼──────┐      ┌──────▼──────┐
+    │    db     │      │     app     │      │     web     │
+    │  :5432    │◄─────┤    :9000    │◄─────┤    :80      │
+    │ (internal)│      │  (internal) │      │  (exposed)  │
+    └───────────┘      └─────▲───────┘      └─────────────┘
+                             │
+                             │
+                       ┌─────▼─────┐
+                       │   cron    │
+                       │ (no ports)│
+                       └───────────┘
+```
+
+---
+
+## Port Mappings
+
+### Exposed Ports
+
+Only the web service exposes a port to the host system:
+
+| Service | Container Port | Host Port | Protocol | Access |
+|---------|---------------|-----------|----------|---------|
+| **web** | 80 | 80 | HTTP | Public |
+| **app** | 9000 | - | FastCGI | Internal only |
+| **db** | 5432 | - | PostgreSQL | Internal only |
+| **cron** | - | - | - | No network ports |
+
+<Note>
+The `app` and `db` services use standard ports (9000 for PHP-FPM, 5432 for PostgreSQL) but these are only accessible within the `moodle-net` network.
+</Note>
+
+### Port Mapping Syntax
+
+```yaml
+web:
+  ports:
+    - "80:80"  # host_port:container_port
+```
+
+**Format**: `"HOST:CONTAINER"`
+- **HOST**: Port on your server (accessible externally)
+- **CONTAINER**: Port inside the Docker container
+
+<Warning>
+Changing the host port (first number) will change where users access Moodle. Changing the container port (second number) requires updating the Nginx configuration.
+</Warning>
+
+---
+
+## Service Discovery
+
+Docker's built-in DNS server enables containers to find each other by service name.
+
+### DNS Resolution
+
+Each service can be reached using its service name as the hostname:
+
+<CardGroup cols={2}>
+  <Card title="Database" icon="database">
+    **Hostname**: `db`  
+    **Resolves to**: Container IP on moodle-net  
+    **Port**: `5432`
+    
+    ```bash
+    psql -h db -U moodleuser -d moodle
+    ```
+  </Card>
+  
+  <Card title="Application" icon="server">
+    **Hostname**: `app`  
+    **Resolves to**: Container IP on moodle-net  
+    **Port**: `9000`
+    
+    ```nginx
+    fastcgi_pass app:9000;
+    ```
+  </Card>
+</CardGroup>
+
+### Connection Examples
+
+**From web to app** (Nginx configuration):
+```nginx
+location ~ [^/]\.php(/|$) {
+    fastcgi_pass app:9000;  # Uses service name
+    # ...
+}
+```
+
+**From app to db** (Moodle environment):
+```yaml
+environment:
+  MOODLE_DB_HOST: db  # Service name resolves automatically
+```
+
+**From host to database** (using Docker network):
+```bash
+# This won't work - db port not exposed:
+psql -h localhost -U moodleuser
+
+# This works - connect through Docker network:
+docker exec -it moodle_app psql -h db -U moodleuser -d moodle
+```
+
+---
+
+## Communication Patterns
+
+### HTTP Request Flow
+
+1. **External → Web Server**
+   - Client sends HTTP request to `http://your-server:80`
+   - Request enters the `moodle-net` network through the web container
+
+2. **Web Server → Application**
+   - Nginx determines request type (static vs. PHP)
+   - PHP requests proxied to `app:9000` via FastCGI protocol
+   - Connection: `web:internal → app:9000`
+
+3. **Application → Database**
+   - PHP code executes Moodle logic
+   - Database queries sent to `db:5432`
+   - Connection: `app:internal → db:5432`
+
+4. **Response Path**
+   - Database returns results to app
+   - App processes and generates HTML/JSON
+   - Nginx receives response and sends to client
+
+### Cron Communication
+
+The cron container doesn't handle network requests. Instead, it:
+
+1. Executes PHP CLI commands directly (no FastCGI)
+2. Accesses Moodle code via shared filesystem
+3. Connects to database using `db:5432` when needed
+4. Reads/writes to `moodledata` via shared volume
+
+<Info>
+Cron uses the same database connection settings as the app container but executes commands directly through PHP CLI rather than through the web server.
+</Info>
+
+---
+
+## Network Isolation
+
+### Internal-Only Services
+
+Services without port mappings are completely isolated from external access:
+
+```yaml
+db:
+  # No 'ports' configuration
+  # Database ONLY accessible from moodle-net
+```
+
+**Benefits**:
+- Database cannot be accessed from internet
+- PHP-FPM not exposed to external attacks
+- Reduced attack surface
+
+### Security Implications
+
+<CardGroup cols={2}>
+  <Card title="Attack Surface" icon="shield-halved">
+    Only HTTP port 80 is exposed  
+    Database and application layers isolated
+  </Card>
+  
+  <Card title="Defense in Depth" icon="layer-group">
+    Compromised web server cannot directly access host  
+    Network segmentation limits lateral movement
+  </Card>
+</CardGroup>
+
+<Warning>
+Even though the database is not exposed externally, you should still use strong passwords and keep PostgreSQL updated.
+</Warning>
+
+---
+
+## Network Performance
+
+### Localhost Performance
+
+Containers on the same Docker network communicate through the Linux kernel's networking stack, providing near-native performance:
+
+- **Latency**: Sub-millisecond between containers
+- **Throughput**: Limited by Docker's bridge driver (typically 10+ Gbps)
+- **Overhead**: Minimal compared to external network calls
+
+### Connection Pooling
+
+PHP-FPM maintains persistent database connections:
+
+```ini
+# Configured in Dockerfile
+pm = dynamic
+pm.max_children = 50
+pm.start_servers = 5
+pm.min_spare_servers = 5
+pm.max_spare_servers = 35
+```
+
+This reduces connection overhead between `app` and `db` containers.
+
+---
+
+## Inspecting the Network
+
+### View Network Details
+
+```bash
+docker network inspect ipmoodle_moodle-net
+```
+
+**Output includes**:
+- Network subnet and gateway
+- Connected containers and their IPs
+- Network configuration options
+
+<Accordion title="Example Output">
+```json
+[
+    {
+        "Name": "ipmoodle_moodle-net",
+        "Driver": "bridge",
+        "Scope": "local",
+        "IPAM": {
+            "Config": [
+                {
+                    "Subnet": "172.18.0.0/16",
+                    "Gateway": "172.18.0.1"
+                }
+            ]
+        },
+        "Containers": {
+            "abc123": {
+                "Name": "moodle_db",
+                "IPv4Address": "172.18.0.2/16"
+            },
+            "def456": {
+                "Name": "moodle_app",
+                "IPv4Address": "172.18.0.3/16"
+            },
+            "ghi789": {
+                "Name": "moodle_web",
+                "IPv4Address": "172.18.0.4/16"
+            },
+            "jkl012": {
+                "Name": "moodle_cron",
+                "IPv4Address": "172.18.0.5/16"
+            }
+        }
+    }
+]
+```
+</Accordion>
+
+### List Connected Containers
+
+```bash
+docker network ls
+```
+
+### Test Connectivity
+
+From inside a container:
+
+```bash
+# Test app to database connection
+docker exec -it moodle_app ping db
+
+# Test app to web connection
+docker exec -it moodle_app nc -zv web 80
+
+# Check DNS resolution
+docker exec -it moodle_app nslookup db
+```
+
+---
+
+## Troubleshooting Network Issues
+
+### Common Problems
+
+<Accordion title="Cannot connect to database">
+**Symptom**: Moodle shows database connection errors
+
+**Checks**:
+1. Verify database container is running:
+   ```bash
+   docker ps | grep moodle_db
+   ```
+
+2. Test DNS resolution from app container:
+   ```bash
+   docker exec -it moodle_app ping db
+   ```
+
+3. Check database is listening:
+   ```bash
+   docker exec -it moodle_db pg_isready
+   ```
+
+4. Verify network connectivity:
+   ```bash
+   docker exec -it moodle_app nc -zv db 5432
+   ```
+</Accordion>
+
+<Accordion title="502 Bad Gateway from Nginx">
+**Symptom**: Nginx returns 502 error
+
+**Checks**:
+1. Verify app container is running:
+   ```bash
+   docker ps | grep moodle_app
+   ```
+
+2. Check PHP-FPM is listening on port 9000:
+   ```bash
+   docker exec -it moodle_app netstat -tlnp | grep 9000
+   ```
+
+3. Test connectivity from web to app:
+   ```bash
+   docker exec -it moodle_web nc -zv app 9000
+   ```
+
+4. Check Nginx error logs:
+   ```bash
+   docker logs moodle_web
+   ```
+</Accordion>
+
+<Accordion title="Port 80 already in use">
+**Symptom**: Docker Compose fails with "port already allocated"
+
+**Solution**:
+1. Find what's using port 80:
+   ```bash
+   sudo lsof -i :80
+   # or
+   sudo netstat -tlnp | grep :80
+   ```
+
+2. Either:
+   - Stop the conflicting service
+   - Change ipMoodle's host port:
+     ```yaml
+     ports:
+       - "8080:80"  # Use port 8080 instead
+     ```
+</Accordion>
+
+---
+
+## Advanced Network Configuration
+
+### Custom Subnet
+
+Specify a custom subnet for the network:
+
+```yaml
+networks:
+  moodle-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+          gateway: 172.25.0.1
+```
+
+### Static IP Addresses
+
+Assign static IPs to services:
+
+```yaml
+services:
+  db:
+    networks:
+      moodle-net:
+        ipv4_address: 172.25.0.10
+  
+  app:
+    networks:
+      moodle-net:
+        ipv4_address: 172.25.0.20
+```
+
+<Warning>
+Using static IPs is rarely necessary and can complicate deployments. Only use if you have a specific requirement.
+</Warning>
+
+### Multiple Networks
+
+Connect services to multiple networks for segmentation:
+
+```yaml
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+
+services:
+  web:
+    networks:
+      - frontend
+  
+  app:
+    networks:
+      - frontend
+      - backend
+  
+  db:
+    networks:
+      - backend
+```
+
+This approach isolates the database from the web tier.
+
+---
+
+## Network Security Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Minimal Exposure" icon="eye-slash">
+    Only expose ports that need external access  
+    Keep database and app ports internal
+  </Card>
+  
+  <Card title="Firewall Rules" icon="fire">
+    Use host firewall to restrict access to port 80  
+    Consider IP whitelisting for admin access
+  </Card>
+  
+  <Card title="TLS Encryption" icon="lock">
+    Enable HTTPS for all external traffic  
+    See [SSL/HTTPS Setup](/advanced/ssl-https)
+  </Card>
+  
+  <Card title="Network Policies" icon="shield-check">
+    Use Docker network policies for additional isolation  
+    Consider overlay networks for multi-host deployments
+  </Card>
+</CardGroup>
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="SSL/HTTPS Configuration" icon="lock" href="/advanced/ssl-https">
+    Secure your deployment with TLS encryption
+  </Card>
+  
+  <Card title="Scaling" icon="chart-line" href="/advanced/scaling">
+    Scale services across multiple hosts
+  </Card>
+  
+  <Card title="Nginx Configuration" icon="gear" href="/configuration/nginx">
+    Customize web server settings
+  </Card>
+  
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Debug common network issues
+  </Card>
+</CardGroup>

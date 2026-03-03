@@ -1,0 +1,549 @@
+---
+title: Scaling and Load Balancing
+description: Strategies for horizontal scaling and load balancing your ipMoodle deployment to handle increased traffic
+---
+
+## Overview
+
+As your Moodle user base grows, you may need to scale beyond a single server. This guide covers horizontal scaling strategies for ipMoodle, including load balancing, session management, and distributed architectures.
+
+## Current Architecture Limitations
+
+The default ipMoodle deployment (source/docker-compose.yml:1-67) is designed for single-server operation:
+
+- Single PHP-FPM container (`app`)
+- Single nginx container (`web`)
+- Single PostgreSQL container (`db`)
+- Local file storage in `./moodledata`
+
+<Info>
+For most small to medium deployments (under 1,000 concurrent users), vertical scaling (increasing container resources) is sufficient and simpler than horizontal scaling.
+</Info>
+
+## Vertical Scaling (Single Server)
+
+Before implementing horizontal scaling, optimize your existing deployment:
+
+### Increase Container Resources
+
+Add resource limits to `docker-compose.yml`:
+
+```yaml
+services:
+  app:
+    build: .
+    container_name: moodle_app
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+    # ... rest of configuration
+  
+  db:
+    image: postgres:16-alpine
+    container_name: moodle_db
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    # ... rest of configuration
+```
+
+### Scale PHP-FPM Workers
+
+Create `php-fpm.conf` and mount it in your Dockerfile:
+
+```ini
+[www]
+pm = dynamic
+pm.max_children = 50
+pm.start_servers = 10
+pm.min_spare_servers = 5
+pm.max_spare_servers = 20
+pm.max_requests = 500
+```
+
+Update `docker-compose.yml`:
+
+```yaml
+app:
+  build: .
+  volumes:
+    - ./html:/var/www/html
+    - ./moodledata:/var/www/moodledata
+    - ./php-fpm.conf:/usr/local/etc/php-fpm.d/www.conf:ro
+```
+
+## Horizontal Scaling Architecture
+
+For larger deployments, implement a multi-server architecture:
+
+```
+                   ┌─────────────────┐
+                   │  Load Balancer  │
+                   │    (nginx)      │
+                   └────────┬────────┘
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+   ┌────▼────┐         ┌────▼────┐         ┌────▼────┐
+   │  app_1  │         │  app_2  │         │  app_3  │
+   │ PHP-FPM │         │ PHP-FPM │         │ PHP-FPM │
+   └────┬────┘         └────┬────┘         └────┬────┘
+        │                   │                   │
+        └───────────────────┼───────────────────┘
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+   ┌────▼─────┐        ┌────▼─────┐      ┌─────▼─────┐
+   │ Database │        │  Redis   │      │    NFS    │
+   │PostgreSQL│        │ (sessions)│      │(moodledata)│
+   └──────────┘        └──────────┘      └───────────┘
+```
+
+## Implementing Load Balancing
+
+<Steps>
+  <Step title="Create load balancer configuration">
+    Create `nginx/load-balancer.conf`:
+    
+    ```nginx
+    upstream moodle_backend {
+        least_conn;  # Use least connections algorithm
+        
+        server app_1:9000 weight=1 max_fails=3 fail_timeout=30s;
+        server app_2:9000 weight=1 max_fails=3 fail_timeout=30s;
+        server app_3:9000 weight=1 max_fails=3 fail_timeout=30s;
+        
+        keepalive 32;  # Connection pooling
+    }
+    
+    server {
+        listen 80;
+        server_name your-domain.com;
+        root /var/www/html/public;
+        index index.php;
+        
+        # Optimización de buffers y tiempos
+        client_max_body_size 512M;
+        fastcgi_read_timeout 300;
+        
+        # Slash Arguments (VITAL para Moodle)
+        location / {
+            try_files $uri $uri/ /index.php$is_args$args;
+        }
+        
+        # Procesamiento PHP - load balanced
+        location ~ [^/]\.php(/|$) {
+            fastcgi_split_path_info ^(.+\.php)(/.+)$;
+            fastcgi_pass moodle_backend;  # Use upstream instead of single app
+            fastcgi_index index.php;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_param PATH_INFO $fastcgi_path_info;
+            
+            # Connection pooling
+            fastcgi_keep_conn on;
+        }
+        
+        # Seguridad: Bloquear acceso a archivos sensibles
+        location ~ (/vendor/|/node_modules/|composer\.json|/readme|/README|/LICENSE|/\.git) {
+            deny all;
+            return 404;
+        }
+    }
+    ```
+  </Step>
+  
+  <Step title="Update docker-compose.yml for multiple app containers">
+    ```yaml
+    services:
+      # Base de Datos
+      db:
+        image: postgres:16-alpine
+        container_name: moodle_db
+        restart: always
+        environment:
+          POSTGRES_DB: ${DB_NAME}
+          POSTGRES_USER: ${DB_USER}
+          POSTGRES_PASSWORD: ${DB_PASS}
+        volumes:
+          - ./db_data:/var/lib/postgresql/data
+        networks:
+          - moodle-net
+      
+      # Redis for sessions
+      redis:
+        image: redis:7-alpine
+        container_name: moodle_redis
+        restart: always
+        command: redis-server --appendonly yes
+        volumes:
+          - ./redis_data:/data
+        networks:
+          - moodle-net
+      
+      # Aplicación (PHP-FPM) - Instance 1
+      app_1:
+        build: .
+        container_name: moodle_app_1
+        restart: always
+        environment:
+          MOODLE_DB_TYPE: pgsql
+          MOODLE_DB_HOST: db
+          MOODLE_DB_NAME: ${DB_NAME}
+          MOODLE_DB_USER: ${DB_USER}
+          MOODLE_DB_PASSWORD: ${DB_PASS}
+          MOODLE_URL: ${SITE_URL}
+        volumes:
+          - ./html:/var/www/html
+          - nfs-moodledata:/var/www/moodledata  # Shared storage
+        depends_on:
+          - db
+          - redis
+        networks:
+          - moodle-net
+      
+      # Aplicación (PHP-FPM) - Instance 2
+      app_2:
+        build: .
+        container_name: moodle_app_2
+        restart: always
+        environment:
+          MOODLE_DB_TYPE: pgsql
+          MOODLE_DB_HOST: db
+          MOODLE_DB_NAME: ${DB_NAME}
+          MOODLE_DB_USER: ${DB_USER}
+          MOODLE_DB_PASSWORD: ${DB_PASS}
+          MOODLE_URL: ${SITE_URL}
+        volumes:
+          - ./html:/var/www/html
+          - nfs-moodledata:/var/www/moodledata  # Shared storage
+        depends_on:
+          - db
+          - redis
+        networks:
+          - moodle-net
+      
+      # Aplicación (PHP-FPM) - Instance 3
+      app_3:
+        build: .
+        container_name: moodle_app_3
+        restart: always
+        environment:
+          MOODLE_DB_TYPE: pgsql
+          MOODLE_DB_HOST: db
+          MOODLE_DB_NAME: ${DB_NAME}
+          MOODLE_DB_USER: ${DB_USER}
+          MOODLE_DB_PASSWORD: ${DB_PASS}
+          MOODLE_URL: ${SITE_URL}
+        volumes:
+          - ./html:/var/www/html
+          - nfs-moodledata:/var/www/moodledata  # Shared storage
+        depends_on:
+          - db
+          - redis
+        networks:
+          - moodle-net
+      
+      # Cron (single instance)
+      cron:
+        build: .
+        container_name: moodle_cron
+        restart: always
+        command: sh -c "echo '*/1 * * * * /usr/local/bin/php /var/www/html/admin/cli/cron.php > /dev/null 2>&1' > /var/spool/cron/crontabs/www-data && crond -f -l 8"
+        volumes:
+          - ./html:/var/www/html
+          - nfs-moodledata:/var/www/moodledata
+        depends_on:
+          - app_1
+        networks:
+          - moodle-net
+      
+      # Load Balancer
+      web:
+        image: nginx:alpine
+        container_name: moodle_web
+        restart: always
+        ports:
+          - "80:80"
+          - "443:443"
+        volumes:
+          - ./html:/var/www/html:ro
+          - ./nginx/load-balancer.conf:/etc/nginx/conf.d/default.conf:ro
+        depends_on:
+          - app_1
+          - app_2
+          - app_3
+        networks:
+          - moodle-net
+    
+    volumes:
+      nfs-moodledata:
+        driver: local
+        driver_opts:
+          type: nfs
+          o: addr=nfs-server-ip,rw,nfsvers=4
+          device: ":/moodledata"
+    
+    networks:
+      moodle-net:
+        driver: bridge
+    ```
+  </Step>
+</Steps>
+
+## Shared Session Storage with Redis
+
+When running multiple app containers, sessions must be centralized:
+
+<Steps>
+  <Step title="Install Redis PHP extension">
+    Add to your Dockerfile (source/Dockerfile:26-27):
+    
+    ```dockerfile
+    RUN apk add --no-cache --virtual .build-deps \
+            $PHPIZE_DEPS \
+            autoconf \
+            g++ \
+            make \
+        && pecl install redis \
+        && docker-php-ext-enable redis \
+        && apk del .build-deps
+    ```
+  </Step>
+  
+  <Step title="Configure Moodle to use Redis sessions">
+    Edit `./html/config.php`:
+    
+    ```php
+    // Redis session handler
+    $CFG->session_handler_class = '\core\session\redis';
+    $CFG->session_redis_host = 'redis';
+    $CFG->session_redis_port = 6379;
+    $CFG->session_redis_database = 0;
+    $CFG->session_redis_prefix = 'moodle_session_';
+    $CFG->session_redis_acquire_lock_timeout = 120;
+    $CFG->session_redis_lock_expire = 7200;
+    ```
+  </Step>
+  
+  <Step title="Rebuild and restart">
+    ```bash
+    docker-compose build --no-cache app_1 app_2 app_3
+    docker-compose up -d
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+Without shared session storage, users may be logged out randomly as their requests hit different app containers.
+</Warning>
+
+## Shared File Storage (NFS)
+
+Moodle's `moodledata` directory must be accessible to all app containers:
+
+### Option 1: NFS Server
+
+<Steps>
+  <Step title="Set up NFS server">
+    On a dedicated NFS server:
+    
+    ```bash
+    sudo apt-get install nfs-kernel-server
+    sudo mkdir -p /export/moodledata
+    sudo chown -R 82:82 /export/moodledata  # www-data UID/GID
+    ```
+    
+    Edit `/etc/exports`:
+    ```
+    /export/moodledata 192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash)
+    ```
+    
+    ```bash
+    sudo exportfs -ra
+    sudo systemctl restart nfs-kernel-server
+    ```
+  </Step>
+  
+  <Step title="Configure NFS volume in docker-compose.yml">
+    See the volume configuration in the previous docker-compose.yml example.
+  </Step>
+</Steps>
+
+### Option 2: Cloud Storage (S3)
+
+For cloud deployments, use S3-compatible storage:
+
+```php
+// In ./html/config.php
+$CFG->alternative_file_system_class = '\tool_objectfs\s3_file_system';
+```
+
+Install the Object File System plugin via Moodle admin interface.
+
+## Database Scaling
+
+### Read Replicas
+
+For read-heavy workloads, configure PostgreSQL read replicas:
+
+```yaml
+db_primary:
+  image: postgres:16-alpine
+  environment:
+    POSTGRES_DB: ${DB_NAME}
+    POSTGRES_USER: ${DB_USER}
+    POSTGRES_PASSWORD: ${DB_PASS}
+  command: |
+    postgres
+    -c wal_level=replica
+    -c max_wal_senders=3
+    -c max_replication_slots=3
+
+db_replica:
+  image: postgres:16-alpine
+  environment:
+    POSTGRES_PRIMARY_HOST: db_primary
+    POSTGRES_PRIMARY_PORT: 5432
+```
+
+<Note>
+Moodle has limited built-in support for read replicas. Consider using PgBouncer for connection pooling instead.
+</Note>
+
+### Connection Pooling with PgBouncer
+
+```yaml
+pgbouncer:
+  image: pgbouncer/pgbouncer:latest
+  environment:
+    DATABASES_HOST: db
+    DATABASES_PORT: 5432
+    DATABASES_USER: ${DB_USER}
+    DATABASES_PASSWORD: ${DB_PASS}
+    DATABASES_DBNAME: ${DB_NAME}
+    PGBOUNCER_POOL_MODE: transaction
+    PGBOUNCER_MAX_CLIENT_CONN: 1000
+    PGBOUNCER_DEFAULT_POOL_SIZE: 25
+```
+
+Update app containers to connect to `pgbouncer:6432` instead of `db:5432`.
+
+## Auto-Scaling with Docker Swarm
+
+For dynamic scaling based on load:
+
+```bash
+# Initialize swarm
+docker swarm init
+
+# Deploy stack
+docker stack deploy -c docker-compose.yml moodle
+
+# Scale app service
+docker service scale moodle_app=5
+```
+
+Update `docker-compose.yml` for swarm mode:
+
+```yaml
+version: '3.8'
+services:
+  app:
+    image: your-registry/moodle-app:latest
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+```
+
+## Monitoring Scaled Deployments
+
+Monitor your scaled infrastructure:
+
+```bash
+# Check container stats
+docker stats
+
+# Monitor nginx upstream status
+curl http://localhost/nginx_status
+
+# Check Redis connections
+docker exec moodle_redis redis-cli info clients
+
+# Database connection count
+docker exec moodle_db psql -U ${DB_USER} -d ${DB_NAME} -c "SELECT count(*) FROM pg_stat_activity;"
+```
+
+## Performance Tuning
+
+### Enable Moodle Caching
+
+Configure application caching in Moodle:
+
+**Site administration > Plugins > Caching > Configuration**
+
+- **Application cache**: Redis
+- **Session cache**: Redis  
+- **Request cache**: Static acceleration
+
+### Nginx Caching
+
+Add to `nginx/load-balancer.conf`:
+
+```nginx
+proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=moodle_cache:10m max_size=1g inactive=60m;
+
+location ~ \.php$ {
+    # Cache static responses
+    fastcgi_cache moodle_cache;
+    fastcgi_cache_valid 200 60m;
+    fastcgi_cache_bypass $http_pragma $http_authorization;
+    add_header X-Cache-Status $upstream_cache_status;
+}
+```
+
+<Info>
+Always test caching thoroughly to ensure dynamic content updates correctly.
+</Info>
+
+## Troubleshooting
+
+<Accordion title="Users experiencing random logouts">
+This indicates session storage is not shared. Verify Redis is configured and all app containers can connect:
+
+```bash
+docker exec moodle_app_1 php -r "echo extension_loaded('redis') ? 'OK' : 'FAIL';"
+```
+</Accordion>
+
+<Accordion title="File upload failures on some requests">
+Moodledata is not properly shared. Check NFS mount:
+
+```bash
+docker exec moodle_app_1 df -h | grep moodledata
+```
+</Accordion>
+
+<Accordion title="Uneven load distribution">
+Check nginx upstream configuration and container health:
+
+```bash
+docker ps --format "table {{.Names}}\t{{.Status}}"
+```
+</Accordion>

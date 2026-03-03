@@ -1,0 +1,460 @@
+---
+title: Database configuration
+description: PostgreSQL setup and optimization for Moodle
+---
+
+ipMoodle uses PostgreSQL 16 as the database backend, configured through Docker Compose with persistent storage.
+
+## Database service configuration
+
+The database is defined in `docker-compose.yml`:
+
+```yaml docker-compose.yml:3-14
+db:
+  image: postgres:16-alpine
+  container_name: moodle_db
+  restart: always
+  environment:
+    POSTGRES_DB: ${DB_NAME}
+    POSTGRES_USER: ${DB_USER}
+    POSTGRES_PASSWORD: ${DB_PASS}
+  volumes:
+    - ./db_data:/var/lib/postgresql/data
+  networks:
+    - moodle-net
+```
+
+### Key components
+
+<ParamField path="image" type="string" default="postgres:16-alpine">
+  PostgreSQL 16 using the lightweight Alpine Linux base
+  
+  **Version 16 features:**
+  - Improved query performance
+  - Better index management
+  - Enhanced monitoring capabilities
+</ParamField>
+
+<ParamField path="volumes" type="string" default="./db_data:/var/lib/postgresql/data">
+  Persistent storage for database files
+  
+  All database data is stored in `./db_data` on the host, ensuring data survives container restarts and removals.
+  
+  <Warning>Never delete this directory unless you want to lose all Moodle data</Warning>
+</ParamField>
+
+## Environment variables
+
+Database initialization is controlled by PostgreSQL's standard environment variables:
+
+<ParamField path="POSTGRES_DB" type="string" default="moodle">
+  Name of the database created during first initialization
+  
+  Set via `DB_NAME` in `deploy.sh`
+</ParamField>
+
+<ParamField path="POSTGRES_USER" type="string" default="moodle">
+  Database superuser username
+  
+  Set via `DB_USER` in `deploy.sh`
+</ParamField>
+
+<ParamField path="POSTGRES_PASSWORD" type="string" default="moodle">
+  Database superuser password
+  
+  Set via `DB_PASS` in `deploy.sh`
+  
+  <Warning>Change this from the default for production deployments</Warning>
+</ParamField>
+
+## Database connection from Moodle
+
+The application container connects to PostgreSQL using these environment variables:
+
+```yaml docker-compose.yml:22-26
+environment:
+  MOODLE_DB_TYPE: pgsql
+  MOODLE_DB_HOST: db
+  MOODLE_DB_NAME: ${DB_NAME}
+  MOODLE_DB_USER: ${DB_USER}
+  MOODLE_DB_PASSWORD: ${DB_PASS}
+```
+
+- **MOODLE_DB_HOST: db** — Docker service discovery resolves `db` to the database container's IP
+- **MOODLE_DB_TYPE: pgsql** — Moodle's PostgreSQL driver
+
+## Accessing the database
+
+### Using psql CLI
+
+Connect to PostgreSQL from the host:
+
+```bash
+docker compose exec db psql -U moodle -d moodle
+```
+
+Common psql commands:
+
+```sql
+-- List all databases
+\l
+
+-- List all tables in current database
+\dt
+
+-- Describe a table structure
+\d mdl_user
+
+-- Show database size
+SELECT pg_size_pretty(pg_database_size('moodle'));
+
+-- Show table sizes
+SELECT 
+  schemaname,
+  tablename,
+  pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
+FROM pg_tables
+WHERE schemaname = 'public'
+ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC
+LIMIT 10;
+
+-- Exit psql
+\q
+```
+
+### Database backup
+
+Create a full database dump:
+
+```bash
+docker compose exec db pg_dump -U moodle moodle > backup-$(date +%Y%m%d).sql
+```
+
+Or using pg_dumpall for all databases:
+
+```bash
+docker compose exec db pg_dumpall -U moodle > full-backup-$(date +%Y%m%d).sql
+```
+
+### Database restore
+
+Restore from a backup file:
+
+```bash
+cat backup-20260303.sql | docker compose exec -T db psql -U moodle -d moodle
+```
+
+<Warning>
+  This will overwrite existing data. Stop the app container first to prevent conflicts:
+  ```bash
+  docker compose stop app cron
+  ```
+</Warning>
+
+## Performance optimization
+
+### PostgreSQL configuration
+
+For production deployments, customize PostgreSQL settings. Create `postgres.conf`:
+
+```ini postgres.conf
+# Memory settings (adjust based on available RAM)
+shared_buffers = 256MB
+effective_cache_size = 1GB
+maintenance_work_mem = 64MB
+work_mem = 16MB
+
+# Connection settings
+max_connections = 100
+
+# WAL settings for performance
+wal_buffers = 16MB
+checkpoint_completion_target = 0.9
+
+# Query planner
+random_page_cost = 1.1
+effective_io_concurrency = 200
+
+# Logging (for monitoring)
+log_min_duration_statement = 1000  # Log slow queries (> 1 second)
+log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+```
+
+Mount this configuration:
+
+```yaml docker-compose.yml
+db:
+  image: postgres:16-alpine
+  volumes:
+    - ./db_data:/var/lib/postgresql/data
+    - ./postgres.conf:/etc/postgresql/postgresql.conf:ro
+  command: postgres -c config_file=/etc/postgresql/postgresql.conf
+```
+
+### Memory calculation guidelines
+
+<CardGroup cols={2}>
+  <Card title="shared_buffers" icon="memory">
+    **25% of total RAM** dedicated to the database
+    
+    - 4GB RAM: `shared_buffers = 1GB`
+    - 8GB RAM: `shared_buffers = 2GB`
+  </Card>
+  
+  <Card title="effective_cache_size" icon="hard-drive">
+    **50-75% of total RAM** for disk cache
+    
+    - 4GB RAM: `effective_cache_size = 2GB`
+    - 8GB RAM: `effective_cache_size = 4GB`
+  </Card>
+  
+  <Card title="work_mem" icon="microchip">
+    **Total RAM / max_connections / 4**
+    
+    - 4GB RAM, 100 connections: `work_mem = 10MB`
+    - 8GB RAM, 200 connections: `work_mem = 10MB`
+  </Card>
+  
+  <Card title="maintenance_work_mem" icon="wrench">
+    **5-10% of total RAM** for maintenance ops
+    
+    - 4GB RAM: `maintenance_work_mem = 256MB`
+    - 8GB RAM: `maintenance_work_mem = 512MB`
+  </Card>
+</CardGroup>
+
+### Index optimization
+
+Moodle creates necessary indexes, but you can add custom indexes for performance:
+
+```sql
+-- Example: Add index for frequently queried fields
+CREATE INDEX idx_user_email ON mdl_user(email);
+
+-- Analyze index usage
+SELECT 
+  schemaname,
+  tablename,
+  indexname,
+  idx_scan,
+  idx_tup_read
+FROM pg_stat_user_indexes
+ORDER BY idx_scan DESC;
+
+-- Remove unused indexes
+SELECT 
+  schemaname,
+  tablename,
+  indexname
+FROM pg_stat_user_indexes
+WHERE idx_scan = 0
+  AND indexname NOT LIKE '%pkey';
+```
+
+### VACUUM and ANALYZE
+
+PostgreSQL needs regular maintenance to reclaim space and update statistics:
+
+```bash
+# Manual vacuum
+docker compose exec db psql -U moodle -d moodle -c "VACUUM VERBOSE ANALYZE;"
+
+# Check last vacuum time
+docker compose exec db psql -U moodle -d moodle -c "
+SELECT 
+  schemaname,
+  relname,
+  last_vacuum,
+  last_autovacuum,
+  last_analyze,
+  last_autoanalyze
+FROM pg_stat_user_tables
+ORDER BY last_vacuum DESC NULLS LAST
+LIMIT 10;"
+```
+
+PostgreSQL's autovacuum runs automatically, but you can tune it in `postgres.conf`:
+
+```ini
+autovacuum = on
+autovacuum_max_workers = 3
+autovacuum_naptime = 1min
+```
+
+## Monitoring
+
+### Connection statistics
+
+```bash
+docker compose exec db psql -U moodle -d moodle -c "
+SELECT 
+  count(*) as total_connections,
+  state,
+  usename
+FROM pg_stat_activity
+WHERE datname = 'moodle'
+GROUP BY state, usename;"
+```
+
+### Database size monitoring
+
+```bash
+docker compose exec db psql -U moodle -d moodle -c "
+SELECT 
+  pg_database.datname,
+  pg_size_pretty(pg_database_size(pg_database.datname)) AS size
+FROM pg_database
+ORDER BY pg_database_size(pg_database.datname) DESC;"
+```
+
+### Slow query log
+
+Enable slow query logging by adding to `postgres.conf`:
+
+```ini
+log_min_duration_statement = 1000  # Log queries taking more than 1 second
+log_statement = 'all'               # Or 'ddl', 'mod', 'all'
+logging_collector = on
+log_directory = 'pg_log'
+log_filename = 'postgresql-%Y-%m-%d.log'
+```
+
+View logs:
+
+```bash
+docker compose logs db | grep "duration:"
+```
+
+## Security
+
+### Change default credentials
+
+<Steps>
+  <Step title="Update deploy.sh before first run">
+    ```bash
+    export DB_USER="moodle_prod"
+    export DB_PASS="$(openssl rand -base64 32)"
+    ```
+  </Step>
+  
+  <Step title="For existing deployments, change password">
+    ```bash
+    docker compose exec db psql -U moodle -d moodle -c "
+    ALTER USER moodle WITH PASSWORD 'new_secure_password';"
+    ```
+    
+    Then update `MOODLE_DB_PASSWORD` in `.env` and restart the app container.
+  </Step>
+</Steps>
+
+### Restrict network access
+
+The database is only accessible within the Docker network by default. To connect from outside (for backups or admin tools):
+
+```yaml docker-compose.yml
+db:
+  ports:
+    - "127.0.0.1:5432:5432"  # Only localhost can connect
+```
+
+<Warning>
+  Never expose PostgreSQL to `0.0.0.0:5432` in production. Use SSH tunneling for remote access instead.
+</Warning>
+
+### Enable SSL connections
+
+For encrypted client-server communication, generate certificates and configure PostgreSQL:
+
+```bash
+# Generate self-signed certificate
+docker compose exec db openssl req -new -x509 -days 365 -nodes \
+  -text -out /var/lib/postgresql/data/server.crt \
+  -keyout /var/lib/postgresql/data/server.key \
+  -subj "/CN=moodle_db"
+
+# Set permissions
+docker compose exec db chmod 600 /var/lib/postgresql/data/server.key
+```
+
+Add to `postgres.conf`:
+
+```ini
+ssl = on
+ssl_cert_file = '/var/lib/postgresql/data/server.crt'
+ssl_key_file = '/var/lib/postgresql/data/server.key'
+```
+
+## Troubleshooting
+
+<Accordion title="Database connection refused">
+  1. Check database container is running: `docker compose ps db`
+  2. Check logs: `docker compose logs db`
+  3. Verify network connectivity: `docker compose exec app ping db`
+  4. Ensure credentials match between `.env` and Moodle's `config.php`
+</Accordion>
+
+<Accordion title="Out of disk space">
+  Check database size:
+  ```bash
+  docker compose exec db psql -U moodle -d moodle -c "
+  SELECT pg_size_pretty(pg_database_size('moodle'));"
+  ```
+  
+  Check host disk:
+  ```bash
+  du -sh ./db_data
+  df -h
+  ```
+  
+  Clean up if needed:
+  ```bash
+  docker compose exec db psql -U moodle -d moodle -c "VACUUM FULL VERBOSE;"
+  ```
+</Accordion>
+
+<Accordion title="Slow queries">
+  1. Enable query logging (see Monitoring section)
+  2. Identify slow queries in logs
+  3. Use `EXPLAIN ANALYZE` to understand query plans:
+  
+  ```sql
+  EXPLAIN ANALYZE SELECT * FROM mdl_user WHERE email = 'test@example.com';
+  ```
+  
+  4. Add indexes for frequently queried columns
+  5. Run `ANALYZE` to update statistics
+</Accordion>
+
+<Accordion title="Database won't start after host reboot">
+  PostgreSQL may not shut down cleanly. Remove the PID file:
+  
+  ```bash
+  sudo rm -f ./db_data/postmaster.pid
+  docker compose up -d db
+  ```
+</Accordion>
+
+## Backup strategies
+
+See the [Backup & Restore guide](/operations/backup-restore) for comprehensive backup procedures including:
+
+- Automated daily backups
+- Offsite backup replication
+- Disaster recovery procedures
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Backup & Restore" icon="floppy-disk" href="/operations/backup-restore">
+    Set up automated database backups
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Monitor database performance
+  </Card>
+  <Card title="Security hardening" icon="shield" href="/advanced/security">
+    Additional database security measures
+  </Card>
+  <Card title="Scaling" icon="server" href="/advanced/scaling">
+    Database replication and scaling
+  </Card>
+</CardGroup>

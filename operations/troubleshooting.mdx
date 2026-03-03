@@ -1,0 +1,550 @@
+---
+title: 'Troubleshooting'
+description: 'Common issues and solutions for ipMoodle deployment and operations'
+---
+
+## Overview
+
+This guide covers common issues you may encounter with ipMoodle and their solutions. For each problem, we provide diagnostic steps and resolution procedures.
+
+## Container Issues
+
+### Containers Won't Start
+
+<Accordion title="Symptom: Containers exit immediately after starting">
+**Diagnostic steps:**
+
+```bash
+# Check container logs
+docker compose logs
+
+# Check specific container
+docker logs moodle_app
+```
+
+**Common causes and solutions:**
+
+1. **Port already in use**
+   ```bash
+   # Check what's using port 80
+   sudo lsof -i :80
+   
+   # Kill the process or change the port in docker-compose.yml
+   ports:
+     - "8080:80"  # Use port 8080 instead
+   ```
+
+2. **Database connection failure**
+   ```bash
+   # Verify database is running
+   docker compose up -d db
+   
+   # Check database logs
+   docker logs moodle_db
+   
+   # Verify environment variables
+   docker exec moodle_app env | grep MOODLE_DB
+   ```
+
+3. **Missing environment variables**
+   ```bash
+   # Ensure .env file exists
+   ls -la .env
+   
+   # Verify contents
+   cat .env
+   ```
+</Accordion>
+
+<Accordion title="Symptom: Database container keeps restarting">
+**Diagnostic steps:**
+
+```bash
+# Check restart count
+docker inspect moodle_db | grep RestartCount
+
+# View database logs
+docker logs moodle_db
+```
+
+**Solutions:**
+
+1. **Corrupted database data**
+   ```bash
+   # Stop all services
+   docker compose down
+   
+   # Backup and remove db_data
+   mv ./db_data ./db_data.backup
+   
+   # Restart (will create fresh database)
+   docker compose up -d db
+   
+   # Restore from backup if available
+   ```
+
+2. **Insufficient memory**
+   ```bash
+   # Check system memory
+   free -h
+   
+   # Add memory limits to docker-compose.yml
+   db:
+     deploy:
+       resources:
+         limits:
+           memory: 2G
+   ```
+</Accordion>
+
+### Containers Running But Unresponsive
+
+<Accordion title="Application container not responding">
+**Diagnostic steps:**
+
+```bash
+# Check if PHP-FPM is running
+docker exec moodle_app ps aux | grep php-fpm
+
+# Test internal connectivity
+docker exec moodle_web curl -I http://app:9000
+```
+
+**Solutions:**
+
+1. **PHP-FPM process crashed**
+   ```bash
+   # Restart the container
+   docker restart moodle_app
+   
+   # Check for errors
+   docker logs moodle_app --tail 100
+   ```
+
+2. **Memory limit exceeded**
+   ```bash
+   # Check PHP memory setting
+   docker exec moodle_app php -i | grep memory_limit
+   
+   # Increase limit in Dockerfile and rebuild
+   RUN echo 'memory_limit=1024M' > /usr/local/etc/php/conf.d/moodle.ini
+   
+   docker compose build --no-cache
+   docker compose up -d
+   ```
+</Accordion>
+
+## Network Issues
+
+### Cannot Access Moodle from Browser
+
+<Steps>
+  <Step title="Verify containers are running">
+    ```bash
+    docker compose ps
+    ```
+    
+    All containers should show status "Up"
+  </Step>
+  
+  <Step title="Test local connectivity">
+    ```bash
+    curl -I http://localhost
+    ```
+    
+    Should return HTTP 200 or 301
+  </Step>
+  
+  <Step title="Check firewall rules">
+    ```bash
+    # For UFW
+    sudo ufw status
+    sudo ufw allow 80/tcp
+    
+    # For firewalld
+    sudo firewall-cmd --list-ports
+    sudo firewall-cmd --add-port=80/tcp --permanent
+    sudo firewall-cmd --reload
+    ```
+  </Step>
+  
+  <Step title="Verify port mapping">
+    ```bash
+    docker port moodle_web
+    ```
+    
+    Should show: `80/tcp -> 0.0.0.0:80`
+  </Step>
+  
+  <Step title="Check Nginx configuration">
+    ```bash
+    docker exec moodle_web nginx -t
+    ```
+    
+    Should return "syntax is ok"
+  </Step>
+</Steps>
+
+<Warning>
+If running on a cloud platform (AWS, GCP, Azure), ensure security groups or firewall rules allow inbound traffic on port 80.
+</Warning>
+
+### Internal Container Communication Failure
+
+**Symptom:** Application cannot connect to database
+
+```bash
+# Test database connectivity
+docker exec moodle_app nc -zv db 5432
+
+# Check network configuration
+docker network inspect moodleip_moodle-net
+
+# Verify both containers are on same network
+docker inspect moodle_app | grep NetworkMode
+docker inspect moodle_db | grep NetworkMode
+```
+
+**Solution:**
+
+```bash
+# Recreate network
+docker compose down
+docker network rm moodleip_moodle-net
+docker compose up -d
+```
+
+## Database Issues
+
+### Database Connection Errors
+
+<Accordion title="Error: 'could not connect to server'">
+**Diagnostic:**
+
+```bash
+# Check if database is running
+docker ps | grep moodle_db
+
+# Check database logs
+docker logs moodle_db | grep -i error
+
+# Verify credentials
+docker exec moodle_app env | grep MOODLE_DB
+```
+
+**Solution:**
+
+```bash
+# Verify environment variables match
+cat .env
+
+# Restart database
+docker restart moodle_db
+
+# Wait for database to be ready
+sleep 10
+
+# Test connection
+docker exec moodle_app nc -zv db 5432
+```
+</Accordion>
+
+<Accordion title="Error: 'database does not exist'">
+**Solution:**
+
+```bash
+# Create database manually
+docker exec moodle_db psql -U moodle -c "CREATE DATABASE moodle;"
+
+# Verify
+docker exec moodle_db psql -U moodle -c "\l" | grep moodle
+```
+</Accordion>
+
+<Accordion title="Error: 'too many connections'">
+**Diagnostic:**
+
+```bash
+# Check active connections
+docker exec moodle_db psql -U moodle -d moodle -c "SELECT count(*) FROM pg_stat_activity;"
+```
+
+**Solution:**
+
+```bash
+# Increase max_connections in PostgreSQL
+docker exec moodle_db psql -U moodle -c "ALTER SYSTEM SET max_connections = 200;"
+
+# Restart database
+docker restart moodle_db
+```
+</Accordion>
+
+## Permission Issues
+
+### File Permission Errors
+
+**Symptoms:**
+- Cannot upload files
+- Cannot install plugins
+- Cannot update Moodle
+
+**Diagnostic:**
+
+```bash
+# Check ownership
+docker exec moodle_app ls -la /var/www/html | head -20
+docker exec moodle_app ls -la /var/www/moodledata | head -20
+```
+
+**Solution:**
+
+```bash
+# Fix ownership and permissions
+docker exec moodle_app chown -R www-data:www-data /var/www/html
+docker exec moodle_app chown -R www-data:www-data /var/www/moodledata
+docker exec moodle_app chmod -R 755 /var/www/html
+
+# Verify
+docker exec moodle_app ls -la /var/www/html | head -5
+```
+
+<Note>
+Permission issues commonly occur after manually copying files or extracting archives on the host system.
+</Note>
+
+## Cron Issues
+
+### Cron Jobs Not Running
+
+<Accordion title="Verify cron container is running">
+```bash
+# Check container status
+docker ps | grep moodle_cron
+
+# Check cron logs
+docker logs moodle_cron --tail 50
+
+# Verify crontab
+docker exec moodle_cron cat /var/spool/cron/crontabs/www-data
+```
+</Accordion>
+
+<Accordion title="Manual cron execution for testing">
+```bash
+# Run cron manually to see errors
+docker exec moodle_cron /usr/local/bin/php /var/www/html/admin/cli/cron.php
+
+# Check Moodle logs for cron errors
+docker exec moodle_app tail -f /var/www/moodledata/cron.log
+```
+</Accordion>
+
+**Common issues:**
+
+1. **Cron runs but produces errors**
+   - Check PHP memory limit
+   - Verify file permissions
+   - Review Moodle scheduled tasks in admin panel
+
+2. **Cron container exits**
+   ```bash
+   # Check for syntax errors in cron command
+   docker compose logs cron
+   
+   # Restart cron container
+   docker restart moodle_cron
+   ```
+
+## Performance Issues
+
+### Slow Page Load Times
+
+<Steps>
+  <Step title="Check resource usage">
+    ```bash
+    docker stats --no-stream
+    ```
+  </Step>
+  
+  <Step title="Enable Moodle caching">
+    Navigate to: **Site administration → Plugins → Caching → Configuration**
+    
+    Enable all recommended cache stores
+  </Step>
+  
+  <Step title="Optimize database">
+    ```bash
+    docker exec moodle_db psql -U moodle -d moodle -c "VACUUM ANALYZE;"
+    ```
+  </Step>
+  
+  <Step title="Check for slow queries">
+    ```bash
+    docker exec moodle_db psql -U moodle -d moodle -c "
+      SELECT query, calls, total_time, mean_time
+      FROM pg_stat_statements
+      ORDER BY mean_time DESC
+      LIMIT 10;
+    "
+    ```
+  </Step>
+  
+  <Step title="Increase PHP resources">
+    Edit Dockerfile:
+    
+    ```dockerfile
+    RUN { \
+        echo 'memory_limit=1024M'; \
+        echo 'max_execution_time=300'; \
+    } > /usr/local/etc/php/conf.d/moodle.ini
+    ```
+    
+    Rebuild:
+    ```bash
+    docker compose build --no-cache
+    docker compose up -d
+    ```
+  </Step>
+</Steps>
+
+### High Memory Usage
+
+```bash
+# Identify memory-hungry containers
+docker stats --no-stream --format "table {{.Name}}\t{{.MemUsage}}\t{{.MemPerc}}"
+
+# Check system memory
+free -h
+
+# Review PHP memory settings
+docker exec moodle_app php -i | grep memory_limit
+
+# Clear Moodle cache
+docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/purge_caches.php
+```
+
+## Disk Space Issues
+
+### Running Out of Disk Space
+
+<Accordion title="Identify space usage">
+```bash
+# Check disk usage
+df -h
+
+# Check volume sizes
+du -sh ./html ./moodledata ./db_data
+
+# Find large files
+find ./moodledata -type f -size +100M -exec ls -lh {} \;
+```
+</Accordion>
+
+<Accordion title="Free up space">
+```bash
+# Remove old Docker images
+docker image prune -a
+
+# Clean Docker system
+docker system prune -a --volumes
+
+# Remove old Moodle temp files
+docker exec moodle_app find /var/www/moodledata/temp -type f -mtime +7 -delete
+
+# Vacuum database
+docker exec moodle_db psql -U moodle -d moodle -c "VACUUM FULL;"
+```
+</Accordion>
+
+## Upgrade Issues
+
+### Errors After Moodle Upgrade
+
+<Accordion title="Database schema mismatch">
+```bash
+# Run Moodle upgrade CLI
+docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/upgrade.php
+
+# Check database schema
+docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/check_database_schema.php
+```
+</Accordion>
+
+<Accordion title="Plugin compatibility issues">
+1. Navigate to: **Site administration → Notifications**
+2. Review plugin status
+3. Disable incompatible plugins
+4. Check for plugin updates
+</Accordion>
+
+## Emergency Recovery
+
+### Complete System Failure
+
+<Steps>
+  <Step title="Stop all containers">
+    ```bash
+    docker compose down
+    ```
+  </Step>
+  
+  <Step title="Backup current state">
+    ```bash
+    cp -r ./html ./html.backup
+    cp -r ./moodledata ./moodledata.backup
+    cp -r ./db_data ./db_data.backup
+    ```
+  </Step>
+  
+  <Step title="Remove containers and volumes">
+    ```bash
+    docker compose down -v
+    docker system prune -a
+    ```
+  </Step>
+  
+  <Step title="Restore from backup">
+    Follow the restore procedures in [Backup & Restore](/operations/backup-restore)
+  </Step>
+  
+  <Step title="Restart services">
+    ```bash
+    docker compose up -d
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+Only perform complete system recovery as a last resort. Always attempt targeted troubleshooting first.
+</Warning>
+
+## Getting Help
+
+If you've tried the solutions above and still experience issues:
+
+1. **Check Moodle logs** for detailed error messages
+2. **Review Docker logs** for all containers
+3. **Verify system requirements** meet Moodle's needs
+4. **Search Moodle forums** for similar issues
+5. **Check Docker documentation** for container-specific problems
+
+### Useful Debugging Commands
+
+```bash
+# Complete system status
+docker compose ps
+docker stats --no-stream
+df -h
+free -h
+
+# All container logs
+docker compose logs --tail=100
+
+# Network diagnostics
+docker network ls
+docker network inspect moodleip_moodle-net
+
+# Container inspection
+docker inspect moodle_app | grep -A 10 "NetworkSettings"
+```

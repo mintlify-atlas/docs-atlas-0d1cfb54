@@ -1,0 +1,608 @@
+---
+title: Security Best Practices
+description: Harden your ipMoodle deployment with security best practices and configurations
+---
+
+## Overview
+
+Securing your Moodle deployment is critical to protect student data, prevent unauthorized access, and maintain system integrity. This guide covers security hardening for the ipMoodle Docker stack.
+
+<Warning>
+Security is an ongoing process. Regularly update all components, monitor logs, and review security configurations.
+</Warning>
+
+## Container Security
+
+### Run Containers as Non-Root
+
+The current Dockerfile (source/Dockerfile:38) sets the www-data user to UID/GID 82. Ensure containers run as this user:
+
+<Steps>
+  <Step title="Add USER directive to Dockerfile">
+    Add after line 38 in `source/Dockerfile`:
+    
+    ```dockerfile
+    RUN usermod -u 82 www-data && groupmod -g 82 www-data
+    WORKDIR /var/www/html
+    USER www-data  # Add this line
+    ```
+  </Step>
+  
+  <Step title="Adjust file permissions">
+    Ensure files are owned by www-data:
+    
+    ```bash
+    sudo chown -R 82:82 ./html
+    sudo chown -R 82:82 ./moodledata
+    ```
+  </Step>
+  
+  <Step title="Set read-only root filesystem (optional)">
+    Add to `docker-compose.yml` app service:
+    
+    ```yaml
+    app:
+      build: .
+      security_opt:
+        - no-new-privileges:true
+      read_only: true
+      tmpfs:
+        - /tmp
+        - /var/run
+    ```
+  </Step>
+</Steps>
+
+### Limit Container Capabilities
+
+Drop unnecessary Linux capabilities:
+
+```yaml
+services:
+  app:
+    build: .
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+```
+
+### Use Trusted Base Images
+
+Always verify base image signatures and use specific versions:
+
+```dockerfile
+# Instead of:
+FROM php:8.2-fpm-alpine
+
+# Use:
+FROM php:8.2.15-fpm-alpine3.19@sha256:specific-hash
+```
+
+<Info>
+Find image digests with: `docker pull php:8.2-fpm-alpine && docker inspect php:8.2-fpm-alpine | grep -A 1 RepoDigests`
+</Info>
+
+## Network Security
+
+### Isolate Database Network
+
+The default configuration (source/docker-compose.yml:65-67) uses a bridge network. Enhance isolation:
+
+```yaml
+networks:
+  frontend:
+    driver: bridge
+    internal: false  # Internet-facing
+  backend:
+    driver: bridge
+    internal: true   # Internal only
+
+services:
+  web:
+    networks:
+      - frontend
+      - backend
+  
+  app:
+    networks:
+      - backend
+  
+  db:
+    networks:
+      - backend  # Database never exposed to internet
+```
+
+### Restrict Port Exposure
+
+Only expose necessary ports:
+
+```yaml
+services:
+  web:
+    ports:
+      - "127.0.0.1:80:80"   # Only local interface
+      - "127.0.0.1:443:443"
+  
+  db:
+    # Remove ports section entirely - no external access
+    # ports:
+    #   - "5432:5432"  # NEVER expose database
+```
+
+<Warning>
+Never expose the PostgreSQL port (5432) to the internet. Database should only be accessible from app containers.
+</Warning>
+
+### Enable nginx Security Headers
+
+Add to `nginx/default.conf` (source/nginx/Default.conf:1-31):
+
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
+    root /var/www/html/public;
+    index index.php;
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    
+    # Content Security Policy
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline';" always;
+    
+    # Hide nginx version
+    server_tokens off;
+    
+    # ... rest of configuration
+}
+```
+
+## Database Security
+
+### Use Strong Passwords
+
+Generate secure credentials:
+
+```bash
+# Generate 32-character random passwords
+openssl rand -base64 32
+```
+
+Update `.env`:
+
+```bash
+DB_NAME=moodle_production
+DB_USER=moodle_app
+DB_PASS=generated-strong-password-here
+SITE_URL=https://your-domain.com
+```
+
+<Warning>
+Never commit `.env` file to version control. Add it to `.gitignore`.
+</Warning>
+
+### Enable PostgreSQL SSL
+
+Create `postgres-ssl.conf`:
+
+```conf
+ssl = on
+ssl_cert_file = '/var/lib/postgresql/server.crt'
+ssl_key_file = '/var/lib/postgresql/server.key'
+ssl_ciphers = 'HIGH:MEDIUM:+3DES:!aNULL'
+ssl_prefer_server_ciphers = on
+```
+
+Update `docker-compose.yml`:
+
+```yaml
+db:
+  image: postgres:16-alpine
+  volumes:
+    - ./db_data:/var/lib/postgresql/data
+    - ./postgres-ssl.conf:/etc/postgresql/postgresql.conf
+    - ./ssl/server.crt:/var/lib/postgresql/server.crt:ro
+    - ./ssl/server.key:/var/lib/postgresql/server.key:ro
+  command: postgres -c config_file=/etc/postgresql/postgresql.conf
+```
+
+### Restrict Database Permissions
+
+Connect to the database and limit app user permissions:
+
+```bash
+docker exec -it moodle_db psql -U postgres
+```
+
+```sql
+-- Revoke public schema access
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+-- Create restricted user
+CREATE USER moodle_app WITH PASSWORD 'your-strong-password';
+GRANT CONNECT ON DATABASE moodle_production TO moodle_app;
+GRANT USAGE ON SCHEMA public TO moodle_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO moodle_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO moodle_app;
+
+-- Prevent user from creating databases
+ALTER USER moodle_app NOCREATEDB NOCREATEROLE;
+```
+
+## PHP Security Hardening
+
+### Disable Dangerous Functions
+
+Add to the PHP configuration in Dockerfile (source/Dockerfile:30-36):
+
+```dockerfile
+RUN { \
+    echo 'max_input_vars=5000'; \
+    echo 'memory_limit=512M'; \
+    echo 'upload_max_filesize=512M'; \
+    echo 'post_max_size=512M'; \
+    echo 'max_execution_time=600'; \
+    echo 'expose_php=Off'; \
+    echo 'display_errors=Off'; \
+    echo 'log_errors=On'; \
+    echo 'error_log=/var/log/php_errors.log'; \
+    echo 'disable_functions=exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source'; \
+    echo 'allow_url_fopen=Off'; \
+    echo 'allow_url_include=Off'; \
+    echo 'session.cookie_httponly=1'; \
+    echo 'session.cookie_secure=1'; \
+    echo 'session.use_strict_mode=1'; \
+} > /usr/local/etc/php/conf.d/moodle.ini
+```
+
+<Note>
+Moodle requires some PHP functions for normal operation. Test thoroughly after disabling functions to ensure compatibility.
+</Note>
+
+### Enable OPcache Security
+
+```dockerfile
+RUN { \
+    echo 'opcache.enable=1'; \
+    echo 'opcache.validate_timestamps=0'; \
+    echo 'opcache.restrict_api=/var/www/html'; \
+} >> /usr/local/etc/php/conf.d/moodle.ini
+```
+
+## Moodle Application Security
+
+### File Permissions
+
+Set correct permissions for Moodle directories:
+
+```bash
+# Moodle code - read-only for web server
+sudo chmod -R 755 ./html
+sudo chown -R 82:82 ./html
+
+# Config file - restrict access
+sudo chmod 440 ./html/config.php
+sudo chown 82:82 ./html/config.php
+
+# Moodledata - writable by web server only
+sudo chmod -R 700 ./moodledata
+sudo chown -R 82:82 ./moodledata
+```
+
+### Secure config.php
+
+Add security settings to `./html/config.php`:
+
+```php
+<?php
+unset($CFG);
+global $CFG;
+$CFG = new stdClass();
+
+// Database configuration
+$CFG->dbtype    = 'pgsql';
+$CFG->dblibrary = 'native';
+$CFG->dbhost    = 'db';
+$CFG->dbname    = getenv('MOODLE_DB_NAME');
+$CFG->dbuser    = getenv('MOODLE_DB_USER');
+$CFG->dbpass    = getenv('MOODLE_DB_PASSWORD');
+$CFG->prefix    = 'mdl_';
+
+// Security settings
+$CFG->wwwroot   = 'https://your-domain.com';
+$CFG->dataroot  = '/var/www/moodledata';
+$CFG->admin     = 'admin';
+
+// Force HTTPS
+$CFG->sslproxy = false;
+
+// Prevent password disclosure in logs
+$CFG->passwordpolicy = true;
+$CFG->minpasswordlength = 12;
+$CFG->minpassworddigits = 2;
+$CFG->minpasswordlower = 2;
+$CFG->minpasswordupper = 2;
+$CFG->minpasswordnonalphanum = 2;
+
+// Session security
+$CFG->sessioncookie = 'MoodleSession';
+$CFG->sessioncookiesecure = true;
+$CFG->sessioncookiehttponly = true;
+
+// Disable insecure features
+$CFG->disableupdateautodeploy = true;
+$CFG->disableupdatenotifications = true;
+
+require_once(__DIR__ . '/lib/setup.php');
+```
+
+### Enable Moodle Security Features
+
+Configure via **Site administration > Security**:
+
+<Steps>
+  <Step title="Site policies">
+    - **Force users to log in**: Yes
+    - **Force users to log in for profiles**: Yes
+    - **Open to Google**: No (unless you want public access)
+  </Step>
+  
+  <Step title="HTTP security">
+    - **Use HTTPS for logins**: Yes
+    - **Cookie secure**: Yes
+    - **Cookie httpOnly**: Yes
+  </Step>
+  
+  <Step title="Notifications">
+    - **Display login failures to**: Nobody
+    - **Email login failures to**: Site administrators
+  </Step>
+  
+  <Step title="Password policy">
+    - Enable all password complexity requirements
+    - **Password length**: 12 minimum
+    - **Require digits**: 2
+    - **Require lowercase**: 2
+    - **Require uppercase**: 2
+    - **Require non-alphanumeric**: 2
+  </Step>
+</Steps>
+
+## Secrets Management
+
+### Use Docker Secrets
+
+For production deployments, use Docker secrets instead of environment variables:
+
+<Steps>
+  <Step title="Create secret files">
+    ```bash
+    echo "your-db-password" | docker secret create db_password -
+    echo "your-db-user" | docker secret create db_user -
+    ```
+  </Step>
+  
+  <Step title="Update docker-compose.yml">
+    ```yaml
+    version: '3.8'
+    services:
+      db:
+        image: postgres:16-alpine
+        secrets:
+          - db_password
+          - db_user
+        environment:
+          POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+          POSTGRES_USER_FILE: /run/secrets/db_user
+    
+    secrets:
+      db_password:
+        external: true
+      db_user:
+        external: true
+    ```
+  </Step>
+</Steps>
+
+### Environment Variable Security
+
+If using `.env` files:
+
+```bash
+# Restrict .env file permissions
+chmod 600 .env
+
+# Ensure .env is in .gitignore
+echo ".env" >> .gitignore
+
+# Create template for documentation
+cp .env .env.example
+sed -i 's/=.*/=CHANGE_ME/g' .env.example
+```
+
+## Security Monitoring and Logging
+
+### Centralized Logging
+
+Collect logs from all containers:
+
+```yaml
+services:
+  app:
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=moodle-app"
+```
+
+### Monitor Failed Login Attempts
+
+Enable Moodle login monitoring:
+
+**Site administration > Plugins > Logging > Standard log**
+- Enable logging
+- Log guest access: Yes
+- Log all actions: Yes
+
+Query failed logins:
+
+```bash
+docker exec moodle_db psql -U ${DB_USER} -d ${DB_NAME} -c "
+SELECT userid, timecreated, ip, target 
+FROM mdl_logstore_standard_log 
+WHERE action = 'failed' AND target = 'user_login' 
+ORDER BY timecreated DESC LIMIT 50;"
+```
+
+### File Integrity Monitoring
+
+Monitor changes to critical files:
+
+```bash
+# Create checksums of original files
+find ./html -type f -exec sha256sum {} \; > checksums.txt
+
+# Verify integrity
+sha256sum -c checksums.txt
+```
+
+## Backup Security
+
+Secure your backup process:
+
+```bash
+# Encrypt database backups
+docker exec moodle_db pg_dump -U ${DB_USER} ${DB_NAME} | \
+  gpg --symmetric --cipher-algo AES256 --output backup-$(date +%Y%m%d).sql.gpg
+
+# Encrypt moodledata
+tar czf - ./moodledata | \
+  gpg --symmetric --cipher-algo AES256 --output moodledata-$(date +%Y%m%d).tar.gz.gpg
+
+# Store encrypted backups offsite
+```
+
+<Warning>
+Always test backup restoration procedures. Encrypted backups are worthless if you lose the decryption key.
+</Warning>
+
+## Regular Maintenance
+
+### Update Schedule
+
+Create a security update schedule:
+
+<Steps>
+  <Step title="Weekly: Review logs">
+    ```bash
+    docker logs moodle_web --since 7d | grep -i error
+    docker logs moodle_app --since 7d | grep -i warning
+    ```
+  </Step>
+  
+  <Step title="Monthly: Update Docker images">
+    ```bash
+    docker-compose pull
+    docker-compose build --no-cache
+    docker-compose up -d
+    ```
+  </Step>
+  
+  <Step title="Quarterly: Security audit">
+    - Review user permissions in Moodle
+    - Check for unused accounts
+    - Review installed plugins
+    - Test disaster recovery procedures
+  </Step>
+</Steps>
+
+### Security Scanning
+
+Scan containers for vulnerabilities:
+
+```bash
+# Install Trivy
+curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+# Scan images
+trivy image php:8.2-fpm-alpine
+trivy image postgres:16-alpine
+trivy image nginx:alpine
+
+# Scan running containers
+trivy container moodle_app
+```
+
+## Incident Response
+
+### Security Breach Checklist
+
+If you suspect a security breach:
+
+<Steps>
+  <Step title="Isolate the system">
+    ```bash
+    # Stop accepting new connections
+    docker-compose stop web
+    
+    # Preserve logs
+    docker logs moodle_app > incident-app-$(date +%Y%m%d).log
+    docker logs moodle_web > incident-web-$(date +%Y%m%d).log
+    docker logs moodle_db > incident-db-$(date +%Y%m%d).log
+    ```
+  </Step>
+  
+  <Step title="Assess the damage">
+    - Review logs for unauthorized access
+    - Check database for modified records
+    - Verify file integrity against checksums
+  </Step>
+  
+  <Step title="Contain and recover">
+    - Reset all passwords
+    - Restore from clean backups if necessary
+    - Patch vulnerabilities
+    - Update all components
+  </Step>
+  
+  <Step title="Post-incident">
+    - Document the incident
+    - Notify affected users if required
+    - Implement additional security controls
+    - Review and update security policies
+  </Step>
+</Steps>
+
+## Security Checklist
+
+Before going to production:
+
+- [ ] HTTPS enabled with valid SSL certificate
+- [ ] Strong passwords for all accounts (database, Moodle admin)
+- [ ] Database not exposed to internet
+- [ ] `.env` file secured and not in version control
+- [ ] File permissions set correctly (700 for moodledata)
+- [ ] PHP security settings configured
+- [ ] nginx security headers enabled
+- [ ] Moodle password policy enforced
+- [ ] Regular backup schedule established
+- [ ] Monitoring and logging enabled
+- [ ] Security updates scheduled
+- [ ] Containers running as non-root user
+- [ ] Unnecessary PHP functions disabled
+- [ ] Container capabilities limited
+- [ ] Network segmentation implemented
+
+<Info>
+Security is not a one-time task. Schedule regular reviews and stay informed about new vulnerabilities affecting Moodle, PHP, PostgreSQL, and nginx.
+</Info>

@@ -1,0 +1,246 @@
+---
+title: 'Maintenance'
+description: 'Regular maintenance tasks and cron job management for ipMoodle'
+---
+
+## Overview
+
+ipMoodle includes automated maintenance through a dedicated cron container that executes Moodle's maintenance tasks. This page covers regular maintenance procedures and cron job management.
+
+## Automated Cron Jobs
+
+### Cron Service Configuration
+
+The cron service runs as a sidecar container alongside your Moodle application:
+
+```yaml
+cron:
+  build: .
+  container_name: moodle_cron
+  restart: always
+  command: sh -c "echo '*/1 * * * * /usr/local/bin/php /var/www/html/admin/cli/cron.php > /dev/null 2>&1' > /var/spool/cron/crontabs/www-data && crond -f -l 8"
+  volumes:
+    - ./html:/var/www/html
+    - ./moodledata:/var/www/moodledata
+```
+
+<Info>
+The cron container executes Moodle's maintenance tasks **every minute** to ensure timely processing of scheduled activities, notifications, and background tasks.
+</Info>
+
+### Checking Cron Status
+
+<Steps>
+  <Step title="View cron container logs">
+    Monitor cron execution in real-time:
+    
+    ```bash
+    docker logs -f moodle_cron
+    ```
+  </Step>
+  
+  <Step title="Verify cron is running">
+    Check if the cron container is active:
+    
+    ```bash
+    docker ps | grep moodle_cron
+    ```
+  </Step>
+  
+  <Step title="Inspect cron schedule">
+    View the active cron configuration inside the container:
+    
+    ```bash
+    docker exec moodle_cron cat /var/spool/cron/crontabs/www-data
+    ```
+  </Step>
+</Steps>
+
+### Manual Cron Execution
+
+To manually trigger Moodle's cron (useful for testing or immediate execution):
+
+```bash
+docker exec moodle_cron /usr/local/bin/php /var/www/html/admin/cli/cron.php
+```
+
+<Warning>
+Do not run manual cron while the automated cron is active, as this may cause conflicts or duplicate task execution.
+</Warning>
+
+## Container Maintenance
+
+### Restarting Services
+
+Restart individual containers without downtime for others:
+
+```bash
+# Restart the application container
+docker restart moodle_app
+
+# Restart the web server
+docker restart moodle_web
+
+# Restart the cron service
+docker restart moodle_cron
+
+# Restart the database (causes brief downtime)
+docker restart moodle_db
+```
+
+### Updating Containers
+
+<Steps>
+  <Step title="Pull latest images">
+    Update base images to get security patches:
+    
+    ```bash
+    docker compose pull
+    ```
+  </Step>
+  
+  <Step title="Rebuild custom images">
+    Rebuild the custom PHP-FPM image:
+    
+    ```bash
+    docker compose build --no-cache
+    ```
+  </Step>
+  
+  <Step title="Recreate containers">
+    Apply updates by recreating containers:
+    
+    ```bash
+    docker compose up -d
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Your data is preserved in volumes (`./html`, `./moodledata`, `./db_data`) and will not be affected by container updates.
+</Note>
+
+## Volume Maintenance
+
+### Checking Volume Usage
+
+Monitor disk space used by Moodle volumes:
+
+```bash
+# Check total disk usage
+du -sh ./html ./moodledata ./db_data
+
+# Detailed breakdown
+du -h --max-depth=1 ./moodledata
+```
+
+### Cleaning Up
+
+<Accordion title="Remove old log files">
+```bash
+docker exec moodle_app find /var/www/moodledata/temp -type f -mtime +7 -delete
+```
+</Accordion>
+
+<Accordion title="Clean Docker system cache">
+```bash
+# Remove unused images and containers
+docker system prune -a
+
+# Remove unused volumes (be careful!)
+docker volume prune
+```
+</Accordion>
+
+<Accordion title="Clear Moodle cache">
+```bash
+docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/purge_caches.php
+```
+</Accordion>
+
+## Database Maintenance
+
+### Optimize Database Tables
+
+Run PostgreSQL vacuum to reclaim space and optimize performance:
+
+```bash
+docker exec moodle_db psql -U moodle -d moodle -c "VACUUM ANALYZE;"
+```
+
+### Database Statistics
+
+Check database size and connection count:
+
+```bash
+# Database size
+docker exec moodle_db psql -U moodle -d moodle -c "SELECT pg_size_pretty(pg_database_size('moodle'));"
+
+# Active connections
+docker exec moodle_db psql -U moodle -d moodle -c "SELECT count(*) FROM pg_stat_activity;"
+```
+
+## Scheduled Maintenance Windows
+
+For major updates or maintenance:
+
+<Steps>
+  <Step title="Enable maintenance mode">
+    ```bash
+    docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/maintenance.php --enable
+    ```
+  </Step>
+  
+  <Step title="Perform maintenance tasks">
+    Execute your updates, backups, or configuration changes.
+  </Step>
+  
+  <Step title="Disable maintenance mode">
+    ```bash
+    docker exec moodle_app /usr/local/bin/php /var/www/html/admin/cli/maintenance.php --disable
+    ```
+  </Step>
+</Steps>
+
+## Permission Management
+
+Ensure correct ownership and permissions for Moodle files:
+
+```bash
+# Fix ownership
+docker exec moodle_app chown -R www-data:www-data /var/www/html
+docker exec moodle_app chown -R www-data:www-data /var/www/moodledata
+
+# Fix permissions
+docker exec moodle_app chmod -R 755 /var/www/html
+```
+
+<Warning>
+Incorrect permissions can prevent Moodle from writing files, installing plugins, or processing uploads.
+</Warning>
+
+## Health Checks
+
+### Application Health
+
+Verify PHP-FPM is responding:
+
+```bash
+docker exec moodle_app ps aux | grep php-fpm
+```
+
+### Web Server Health
+
+Check Nginx status:
+
+```bash
+docker exec moodle_web nginx -t
+```
+
+### Network Connectivity
+
+Test database connection from the app container:
+
+```bash
+docker exec moodle_app nc -zv db 5432
+```

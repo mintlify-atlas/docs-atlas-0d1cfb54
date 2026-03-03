@@ -1,0 +1,394 @@
+---
+title: Nginx configuration
+description: Web server settings for ipMoodle
+---
+
+ipMoodle uses Nginx as a reverse proxy to handle HTTP requests and forward PHP processing to the PHP-FPM container. The configuration is optimized for Moodle's requirements.
+
+## Configuration file
+
+The Nginx configuration is located at `nginx/Default.conf` and mounted into the web container:
+
+```yaml docker-compose.yml:59
+- ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+```
+
+## Full configuration
+
+```nginx nginx/Default.conf
+server {
+    listen 80;
+    #server_name eva.intiinside.com;
+    root /var/www/html/public;
+    index index.php;
+
+    # Optimización de buffers y tiempos
+    client_max_body_size 512M;
+    fastcgi_read_timeout 300;
+    
+    # Slash Arguments (VITAL para Moodle)
+    location / {
+        try_files $uri $uri/ /index.php$is_args$args;
+    }
+
+    # Procesamiento PHP pasando al contenedor "app"
+    location ~ [^/]\.php(/|$) {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass app:9000;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param PATH_INFO $fastcgi_path_info;
+    }
+
+    # Seguridad: Bloquear acceso a archivos sensibles
+    location ~ (/vendor/|/node_modules/|composer\.json|/readme|/README|/LICENSE|/\.git) {
+        deny all;
+        return 404;
+    }
+}
+```
+
+## Key settings
+
+### Server block
+
+<ParamField path="listen" type="integer" default="80">
+  Port on which Nginx listens for HTTP connections
+  
+  This is the internal container port. The `docker-compose.yml` maps this to the host's port 80.
+</ParamField>
+
+<ParamField path="server_name" type="string">
+  Domain name for this server block
+  
+  Currently commented out (`#server_name eva.intiinside.com`). Uncomment and set your domain for production deployments.
+  
+  <Note>Required when using SSL/TLS certificates or hosting multiple sites</Note>
+</ParamField>
+
+<ParamField path="root" type="string" default="/var/www/html/public">
+  Document root directory
+  
+  **Note:** Moodle's actual root is `/var/www/html`, not `/var/www/html/public`. You should change this to:
+  
+  ```nginx
+  root /var/www/html;
+  ```
+</ParamField>
+
+### Upload optimization
+
+```nginx nginx/Default.conf:8
+client_max_body_size 512M;
+```
+
+<ParamField path="client_max_body_size" type="string" default="512M">
+  Maximum size of the client request body (file uploads)
+  
+  This must match or exceed PHP's `upload_max_filesize` and `post_max_size` settings (both 512M in the Dockerfile).
+  
+  **Increase for large video uploads:**
+  ```nginx
+  client_max_body_size 2048M;
+  ```
+</ParamField>
+
+### PHP-FPM timeout
+
+```nginx nginx/Default.conf:9
+fastcgi_read_timeout 300;
+```
+
+<ParamField path="fastcgi_read_timeout" type="string" default="300">
+  Timeout in seconds for reading a response from the FastCGI server (PHP-FPM)
+  
+  300 seconds (5 minutes) allows time for long-running PHP operations like course backups.
+  
+  **Should be less than or equal to PHP's `max_execution_time`** (600 seconds in Dockerfile)
+</ParamField>
+
+### Slash arguments (critical for Moodle)
+
+```nginx nginx/Default.conf:12-14
+location / {
+    try_files $uri $uri/ /index.php$is_args$args;
+}
+```
+
+This configuration enables **slash arguments**, a feature Moodle requires for clean URLs like `/course/view.php/123` instead of `/course/view.php?id=123`.
+
+<Warning>
+  Do not remove or modify this `try_files` directive. Moodle will not work correctly without slash argument support.
+</Warning>
+
+### PHP processing
+
+```nginx nginx/Default.conf:17-24
+location ~ [^/]\.php(/|$) {
+    fastcgi_split_path_info ^(.+\.php)(/.+)$;
+    fastcgi_pass app:9000;
+    fastcgi_index index.php;
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    fastcgi_param PATH_INFO $fastcgi_path_info;
+}
+```
+
+**Key elements:**
+
+- `fastcgi_split_path_info`: Splits the URI into script name and path info (required for slash arguments)
+- `fastcgi_pass app:9000`: Forwards PHP requests to the `app` container on port 9000 (PHP-FPM)
+- `SCRIPT_FILENAME` and `PATH_INFO`: Ensures correct file paths are passed to PHP
+
+### Security blocks
+
+```nginx nginx/Default.conf:27-30
+location ~ (/vendor/|/node_modules/|composer\.json|/readme|/README|/LICENSE|/\.git) {
+    deny all;
+    return 404;
+}
+```
+
+Blocks direct access to sensitive files and directories that should not be publicly accessible.
+
+## Modifying Nginx configuration
+
+<Steps>
+  <Step title="Edit the configuration file">
+    ```bash
+    nano nginx/Default.conf
+    ```
+    
+    Make your changes and save.
+  </Step>
+  
+  <Step title="Test the configuration">
+    ```bash
+    docker compose exec web nginx -t
+    ```
+    
+    Expected output:
+    ```
+    nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+    nginx: configuration file /etc/nginx/nginx.conf test is successful
+    ```
+  </Step>
+  
+  <Step title="Reload Nginx">
+    ```bash
+    docker compose exec web nginx -s reload
+    ```
+    
+    Or restart the container:
+    ```bash
+    docker compose restart web
+    ```
+  </Step>
+</Steps>
+
+## Common customizations
+
+### Enable server name
+
+For production deployments with a domain:
+
+```nginx
+server {
+    listen 80;
+    server_name moodle.example.com;
+    # ... rest of configuration
+}
+```
+
+### Increase upload limit
+
+For large video or backup files:
+
+```nginx
+client_max_body_size 2048M;
+```
+
+<Info>Remember to also increase PHP's `upload_max_filesize` and `post_max_size` in the Dockerfile</Info>
+
+### Add access logging
+
+```nginx
+server {
+    listen 80;
+    access_log /var/log/nginx/moodle-access.log;
+    error_log /var/log/nginx/moodle-error.log;
+    # ... rest of configuration
+}
+```
+
+View logs:
+```bash
+docker compose logs web
+```
+
+### HTTP to HTTPS redirect
+
+When SSL is configured (see [SSL/HTTPS guide](/advanced/ssl-https)):
+
+```nginx
+server {
+    listen 80;
+    server_name moodle.example.com;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name moodle.example.com;
+    
+    ssl_certificate /etc/nginx/ssl/cert.pem;
+    ssl_certificate_key /etc/nginx/ssl/key.pem;
+    
+    # ... rest of configuration
+}
+```
+
+### Custom error pages
+
+```nginx
+error_page 404 /404.html;
+error_page 500 502 503 504 /50x.html;
+
+location = /404.html {
+    root /usr/share/nginx/html;
+    internal;
+}
+
+location = /50x.html {
+    root /usr/share/nginx/html;
+    internal;
+}
+```
+
+### Gzip compression
+
+Add compression for better performance:
+
+```nginx
+server {
+    # ... other settings
+    
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript 
+               application/x-javascript application/xml+rss 
+               application/javascript application/json;
+    gzip_disable "MSIE [1-6]\.";
+}
+```
+
+## Performance tuning
+
+### Worker processes
+
+The base nginx:alpine image uses default worker settings. For high-traffic sites, create a custom `nginx.conf`:
+
+```nginx
+worker_processes auto;
+worker_connections 1024;
+
+events {
+    use epoll;
+    multi_accept on;
+}
+
+http {
+    # ... include your site configs
+}
+```
+
+Mount this as a volume:
+
+```yaml
+web:
+  volumes:
+    - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+```
+
+### Caching static files
+
+Add browser caching for static assets:
+
+```nginx
+location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf)$ {
+    expires 30d;
+    add_header Cache-Control "public, immutable";
+}
+```
+
+<Note>Be cautious with aggressive caching during development or frequent theme changes</Note>
+
+## Troubleshooting
+
+<Accordion title="502 Bad Gateway error">
+  This means Nginx cannot reach PHP-FPM. Check:
+  
+  1. App container is running: `docker compose ps app`
+  2. PHP-FPM is listening on port 9000: `docker compose exec app netstat -tlnp | grep 9000`
+  3. Containers are on the same network: `docker network inspect ipmoodle_moodle-net`
+  4. `fastcgi_pass` points to correct service: `app:9000`
+</Accordion>
+
+<Accordion title="413 Request Entity Too Large">
+  The uploaded file exceeds `client_max_body_size`. Increase the limit:
+  
+  ```nginx
+  client_max_body_size 1024M;
+  ```
+  
+  Then reload: `docker compose exec web nginx -s reload`
+</Accordion>
+
+<Accordion title="504 Gateway Timeout">
+  PHP script execution exceeded `fastcgi_read_timeout`. Increase the timeout:
+  
+  ```nginx
+  fastcgi_read_timeout 600;
+  ```
+  
+  Also ensure PHP's `max_execution_time` is at least this value.
+</Accordion>
+
+<Accordion title="Nginx configuration test fails">
+  Check syntax errors:
+  
+  ```bash
+  docker compose exec web nginx -t
+  ```
+  
+  Common issues:
+  - Missing semicolons
+  - Incorrect directive names
+  - Unclosed blocks (`{` without `}`)
+</Accordion>
+
+<Accordion title="Static files not loading (CSS, JS, images)">
+  1. Check document root is correct: `/var/www/html` (not `/var/www/html/public`)
+  2. Verify files exist in volume: `docker compose exec web ls -la /var/www/html/theme`
+  3. Check file permissions: should be readable by nginx (www-data user)
+</Accordion>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="SSL/HTTPS setup" icon="lock" href="/advanced/ssl-https">
+    Configure SSL certificates for secure connections
+  </Card>
+  <Card title="PHP settings" icon="php" href="/configuration/php-settings">
+    Align PHP timeouts with Nginx settings
+  </Card>
+  <Card title="Performance monitoring" icon="chart-line" href="/operations/monitoring">
+    Monitor Nginx access logs and performance
+  </Card>
+  <Card title="Scaling" icon="server" href="/advanced/scaling">
+    Load balancing with multiple Nginx instances
+  </Card>
+</CardGroup>

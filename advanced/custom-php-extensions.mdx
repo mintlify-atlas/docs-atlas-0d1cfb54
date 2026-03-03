@@ -1,0 +1,281 @@
+---
+title: Custom PHP Extensions
+description: Learn how to add and configure custom PHP extensions to your ipMoodle deployment
+---
+
+## Overview
+
+The ipMoodle Dockerfile is built on `php:8.2-fpm-alpine` and includes essential PHP extensions for Moodle. You can extend this base image to add custom PHP extensions required for specific Moodle plugins or integrations.
+
+## Understanding the Extension Installation Pattern
+
+The Dockerfile (source/Dockerfile:1-39) follows a three-step pattern for installing PHP extensions:
+
+<Steps>
+  <Step title="Install system dependencies">
+    Add required development libraries using `apk add --no-cache`
+  </Step>
+  
+  <Step title="Configure extensions (if needed)">
+    Some extensions like GD require configuration before compilation
+  </Step>
+  
+  <Step title="Install PHP extensions">
+    Use `docker-php-ext-install` to compile and enable extensions
+  </Step>
+</Steps>
+
+## Currently Installed Extensions
+
+The base ipMoodle image includes these extensions:
+
+- **intl** - Internationalization support
+- **soap** - SOAP protocol support
+- **zip** - ZIP archive handling
+- **pgsql** - PostgreSQL database driver
+- **pdo_pgsql** - PDO driver for PostgreSQL
+- **exif** - Image metadata reading
+- **opcache** - PHP opcode caching
+- **bcmath** - Arbitrary precision mathematics
+- **sockets** - Socket communication
+- **mbstring** - Multibyte string handling
+- **sodium** - Modern cryptography
+- **gd** - Image processing (with FreeType and JPEG support)
+
+## Adding a Simple PHP Extension
+
+For extensions that don't require external dependencies:
+
+<Steps>
+  <Step title="Edit the Dockerfile">
+    Open `source/Dockerfile` and locate the extension installation block (line 26-27):
+    
+    ```dockerfile
+    RUN docker-php-ext-install -j$(nproc) \
+        intl soap zip pgsql pdo_pgsql exif opcache bcmath sockets mbstring sodium
+    ```
+  </Step>
+  
+  <Step title="Add your extension">
+    Append your extension name to the list:
+    
+    ```dockerfile
+    RUN docker-php-ext-install -j$(nproc) \
+        intl soap zip pgsql pdo_pgsql exif opcache bcmath sockets mbstring sodium pcntl
+    ```
+  </Step>
+  
+  <Step title="Rebuild the container">
+    ```bash
+    docker-compose down
+    docker-compose build --no-cache app
+    docker-compose up -d
+    ```
+  </Step>
+</Steps>
+
+<Info>
+The `-j$(nproc)` flag enables parallel compilation using all available CPU cores, speeding up the build process.
+</Info>
+
+## Adding Extensions with Dependencies
+
+Extensions requiring system libraries need a two-step process:
+
+### Example: Adding LDAP Extension
+
+<Steps>
+  <Step title="Add system dependencies">
+    Edit the dependency installation block (line 4-19):
+    
+    ```dockerfile
+    RUN apk add --no-cache \
+        git \
+        linux-headers \
+        oniguruma-dev \
+        libsodium-dev \
+        icu-dev \
+        libpng-dev \
+        libjpeg-turbo-dev \
+        freetype-dev \
+        libzip-dev \
+        libxml2-dev \
+        postgresql-dev \
+        zlib-dev \
+        shadow \
+        ghostscript \
+        dcron \
+        openldap-dev  # Add this line
+    ```
+  </Step>
+  
+  <Step title="Add the PHP extension">
+    ```dockerfile
+    RUN docker-php-ext-install -j$(nproc) \
+        intl soap zip pgsql pdo_pgsql exif opcache bcmath sockets mbstring sodium ldap
+    ```
+  </Step>
+  
+  <Step title="Rebuild and verify">
+    ```bash
+    docker-compose build --no-cache app
+    docker-compose up -d
+    docker exec moodle_app php -m | grep ldap
+    ```
+  </Step>
+</Steps>
+
+## Adding Extensions Requiring Configuration
+
+Some extensions need configuration before installation, similar to GD (line 22-23):
+
+### Example: Adding IMAP Extension
+
+```dockerfile
+# Install dependencies
+RUN apk add --no-cache \
+    imap-dev \
+    openssl-dev \
+    krb5-dev
+
+# Configure and install
+RUN docker-php-ext-configure imap --with-kerberos --with-imap-ssl \
+    && docker-php-ext-install -j$(nproc) imap
+```
+
+## Installing PECL Extensions
+
+For extensions not bundled with PHP, use PECL:
+
+### Example: Adding Redis Extension
+
+<Steps>
+  <Step title="Install build dependencies">
+    ```dockerfile
+    RUN apk add --no-cache --virtual .build-deps \
+        $PHPIZE_DEPS \
+        autoconf \
+        g++ \
+        make
+    ```
+  </Step>
+  
+  <Step title="Install the PECL extension">
+    ```dockerfile
+    RUN pecl install redis \
+        && docker-php-ext-enable redis
+    ```
+  </Step>
+  
+  <Step title="Clean up build dependencies">
+    ```dockerfile
+    RUN apk del .build-deps
+    ```
+  </Step>
+</Steps>
+
+<Accordion title="Complete Redis example">
+```dockerfile
+RUN apk add --no-cache --virtual .build-deps \
+        $PHPIZE_DEPS \
+        autoconf \
+        g++ \
+        make \
+    && pecl install redis \
+    && docker-php-ext-enable redis \
+    && apk del .build-deps
+```
+</Accordion>
+
+## Verifying Installed Extensions
+
+After rebuilding, verify your extensions are loaded:
+
+```bash
+# List all enabled extensions
+docker exec moodle_app php -m
+
+# Check specific extension
+docker exec moodle_app php -m | grep redis
+
+# View extension configuration
+docker exec moodle_app php -i | grep -A 5 "redis"
+```
+
+## Configuring Extension Settings
+
+Add extension-specific settings to the PHP configuration (line 30-36):
+
+```dockerfile
+RUN { \
+    echo 'max_input_vars=5000'; \
+    echo 'memory_limit=512M'; \
+    echo 'upload_max_filesize=512M'; \
+    echo 'post_max_size=512M'; \
+    echo 'max_execution_time=600'; \
+    echo 'opcache.enable=1'; \
+    echo 'opcache.memory_consumption=128'; \
+    echo 'redis.session.locking_enabled=1'; \
+} > /usr/local/etc/php/conf.d/moodle.ini
+```
+
+<Warning>
+Always rebuild with `--no-cache` flag when modifying the Dockerfile to ensure changes are applied:
+```bash
+docker-compose build --no-cache app
+```
+</Warning>
+
+## Common Moodle Extensions
+
+Depending on your Moodle plugins, you may need:
+
+| Extension | Use Case | Dependencies |
+|-----------|----------|-------------|
+| `ldap` | LDAP authentication | `openldap-dev` |
+| `imap` | Email integration | `imap-dev openssl-dev krb5-dev` |
+| `redis` | Session/cache storage | PECL extension |
+| `imagick` | Advanced image processing | `imagemagick-dev` |
+| `xsl` | XML transformations | `libxslt-dev` |
+| `curl` | HTTP requests | Usually included |
+| `ftp` | FTP repository support | None |
+
+## Troubleshooting
+
+### Extension fails to compile
+
+<Accordion title="Check system dependencies">
+Ensure all required `-dev` packages are installed in the Alpine dependency block. Search for the extension name + "alpine linux" to find required packages.
+</Accordion>
+
+<Accordion title="Build cache issues">
+Always use `--no-cache` when testing new extensions:
+```bash
+docker-compose build --no-cache app
+```
+</Accordion>
+
+<Accordion title="Extension not loading">
+Check the PHP error log:
+```bash
+docker logs moodle_app
+```
+</Accordion>
+
+### Extension loads but Moodle doesn't recognize it
+
+1. Verify the extension is enabled:
+   ```bash
+   docker exec moodle_app php -m | grep your_extension
+   ```
+
+2. Restart the PHP-FPM service:
+   ```bash
+   docker-compose restart app
+   ```
+
+3. Clear Moodle caches from **Site administration > Development > Purge all caches**
+
+<Note>
+Some Moodle plugins check for specific PHP extensions during installation. Always verify extension requirements before installing plugins.
+</Note>

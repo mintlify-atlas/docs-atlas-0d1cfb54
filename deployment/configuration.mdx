@@ -1,0 +1,427 @@
+---
+title: Post-Installation Configuration
+description: Configure ipMoodle after deployment for production use
+---
+
+After running the deployment script, you need to complete the Moodle setup wizard and configure your installation for production use.
+
+## Moodle Installation Wizard
+
+When you first access your Moodle site, you'll be guided through the installation wizard.
+
+<Steps>
+  <Step title="Access the installation wizard">
+    Navigate to your configured site URL in a web browser:
+    
+    ```
+    http://your-domain.com
+    ```
+  </Step>
+
+  <Step title="Select language">
+    Choose your preferred installation language.
+  </Step>
+
+  <Step title="Confirm paths">
+    Moodle will auto-detect these paths:
+    - **Web address**: Your `SITE_URL`
+    - **Moodle directory**: `/var/www/html`
+    - **Data directory**: `/var/www/moodledata`
+    
+    These are pre-configured by the Docker setup.
+  </Step>
+
+  <Step title="Database configuration">
+    Enter the database settings (these match your `.env` file):
+    
+    | Setting | Value |
+    |---------|-------|
+    | Database type | PostgreSQL |
+    | Database host | `db` |
+    | Database name | `moodle` (or your `DB_NAME`) |
+    | Database user | `moodle` (or your `DB_USER`) |
+    | Database password | `moodle` (or your `DB_PASS`) |
+    | Database port | `5432` |
+    | Tables prefix | `mdl_` |
+    
+    <Info>
+      The database host is `db` (not `localhost`) because containers communicate via Docker network.
+    </Info>
+  </Step>
+
+  <Step title="Review server checks">
+    Moodle will verify that all required PHP extensions are installed. All checks should pass thanks to the custom Dockerfile configuration.
+  </Step>
+
+  <Step title="Accept license terms">
+    Review and accept the Moodle GPL license.
+  </Step>
+
+  <Step title="Install database tables">
+    Moodle will create all necessary database tables. This process takes 2-3 minutes.
+  </Step>
+
+  <Step title="Configure administrator account">
+    Create the primary admin user:
+    - Username
+    - Password
+    - Email address
+    - Site name
+    - Site description
+  </Step>
+
+  <Step title="Complete setup">
+    Configure front page settings and you're done!
+  </Step>
+</Steps>
+
+## Environment Variables
+
+Your deployment uses these environment variables, configured in the generated `.env` file:
+
+### Core Variables
+
+```bash .env
+SITE_URL=https://your-domain.com
+DB_NAME=moodle
+DB_USER=moodle
+DB_PASS=moodle
+```
+
+<Warning>
+  For production environments:
+  1. Use a **strong database password**
+  2. Ensure `SITE_URL` uses HTTPS
+  3. Never commit `.env` to version control
+</Warning>
+
+### Application Container Variables
+
+The `app` service receives these environment variables from `docker-compose.yml:22-27`:
+
+```yaml docker-compose.yml
+environment:
+  MOODLE_DB_TYPE: pgsql
+  MOODLE_DB_HOST: db
+  MOODLE_DB_NAME: ${DB_NAME}
+  MOODLE_DB_USER: ${DB_USER}
+  MOODLE_DB_PASSWORD: ${DB_PASS}
+  MOODLE_URL: ${SITE_URL}
+```
+
+## PHP Configuration
+
+The Dockerfile includes optimized PHP settings for Moodle at `Dockerfile:30-36`:
+
+```ini moodle.ini
+max_input_vars=5000
+memory_limit=512M
+upload_max_filesize=512M
+post_max_size=512M
+max_execution_time=600
+```
+
+### Customizing PHP Settings
+
+To modify PHP configuration:
+
+1. Edit the Dockerfile:
+
+```dockerfile Dockerfile
+RUN { \
+    echo 'max_input_vars=5000'; \
+    echo 'memory_limit=1024M'; \    # Increase memory
+    echo 'upload_max_filesize=1024M'; \
+    echo 'post_max_size=1024M'; \
+    echo 'max_execution_time=900'; \
+} > /usr/local/etc/php/conf.d/moodle.ini
+```
+
+2. Rebuild the image:
+
+```bash
+docker compose build app
+docker compose up -d
+```
+
+<Accordion title="PHP Settings Explained">
+  - **max_input_vars**: Maximum input variables (default 5000 for large forms)
+  - **memory_limit**: Maximum memory per request (512M recommended for Moodle)
+  - **upload_max_filesize**: Maximum file upload size (512M for large course materials)
+  - **post_max_size**: Maximum POST data size (should match or exceed upload limit)
+  - **max_execution_time**: Maximum script execution time in seconds (600 = 10 minutes)
+</Accordion>
+
+## Database Configuration
+
+The PostgreSQL container is configured with persistent storage at `docker-compose.yml:3-14`:
+
+```yaml docker-compose.yml
+db:
+  image: postgres:16-alpine
+  container_name: moodle_db
+  restart: always
+  environment:
+    POSTGRES_DB: ${DB_NAME}
+    POSTGRES_USER: ${DB_USER}
+    POSTGRES_PASSWORD: ${DB_PASS}
+  volumes:
+    - ./db_data:/var/lib/postgresql/data
+```
+
+### Accessing the Database
+
+To connect directly to PostgreSQL:
+
+```bash
+docker compose exec db psql -U moodle -d moodle
+```
+
+### Database Backups
+
+Create a backup:
+
+```bash
+docker compose exec db pg_dump -U moodle moodle > backup_$(date +%Y%m%d).sql
+```
+
+Restore from backup:
+
+```bash
+docker compose exec -T db psql -U moodle -d moodle < backup_20261203.sql
+```
+
+## Cron Configuration
+
+Moodle requires regular cron execution for maintenance tasks. This is handled automatically by the `cron` container at `docker-compose.yml:36-48`:
+
+```yaml docker-compose.yml
+cron:
+  build: .
+  container_name: moodle_cron
+  restart: always
+  command: sh -c "echo '*/1 * * * * /usr/local/bin/php /var/www/html/admin/cli/cron.php > /dev/null 2>&1' > /var/spool/cron/crontabs/www-data && crond -f -l 8"
+  volumes:
+    - ./html:/var/www/html
+    - ./moodledata:/var/www/moodledata
+```
+
+<Info>
+  The cron job runs every minute (`*/1 * * * *`), executing Moodle's maintenance script at `/var/www/html/admin/cli/cron.php`.
+</Info>
+
+### Verifying Cron Execution
+
+Check cron logs:
+
+```bash
+docker compose logs cron
+```
+
+Verify cron is running in Moodle:
+
+1. Log in as admin
+2. Navigate to **Site administration → Server → Scheduled tasks**
+3. Check that tasks show recent "Last run" times
+
+## File Permissions
+
+The deployment script sets proper permissions at `deploy.sh:32-34`:
+
+```bash deploy.sh
+docker compose exec -T app chown -R www-data:www-data /var/www/html
+docker compose exec -T app chown -R www-data:www-data /var/www/moodledata
+docker compose exec -T app chmod -R 755 /var/www/html
+```
+
+### User and Group Configuration
+
+The Dockerfile configures the `www-data` user at `Dockerfile:38`:
+
+```dockerfile Dockerfile
+RUN usermod -u 82 www-data && groupmod -g 82 www-data
+```
+
+<Note>
+  UID/GID 82 is the standard for `www-data` in Alpine Linux, ensuring consistent file ownership.
+</Note>
+
+### Fixing Permission Issues
+
+If you encounter permission errors:
+
+```bash
+docker compose exec app chown -R www-data:www-data /var/www/html
+docker compose exec app chown -R www-data:www-data /var/www/moodledata
+```
+
+## Volume Mounts
+
+The application uses three persistent volumes:
+
+### Moodle Code (`./html`)
+
+```yaml docker-compose.yml
+volumes:
+  - ./html:/var/www/html
+```
+
+Contains the Moodle application code. You can modify files here directly.
+
+### Moodle Data (`./moodledata`)
+
+```yaml docker-compose.yml
+volumes:
+  - ./moodledata:/var/www/moodledata
+```
+
+Stores uploaded files, course content, and temporary data.
+
+<Warning>
+  **Never** make `./moodledata` web-accessible. It contains user data and must remain private.
+</Warning>
+
+### Database Data (`./db_data`)
+
+```yaml docker-compose.yml
+volumes:
+  - ./db_data:/var/lib/postgresql/data
+```
+
+Contains PostgreSQL database files. Backup this directory regularly.
+
+## Network Configuration
+
+All containers communicate via the `moodle-net` bridge network at `docker-compose.yml:65-67`:
+
+```yaml docker-compose.yml
+networks:
+  moodle-net:
+    driver: bridge
+```
+
+### Container Communication
+
+- **app → db**: Connects using hostname `db`
+- **web → app**: Connects via FastCGI to `app:9000`
+- **cron → app**: Shares same code volumes
+
+### External Access
+
+Only the `web` container exposes ports to the host at `docker-compose.yml:55-56`:
+
+```yaml docker-compose.yml
+ports:
+  - "80:80"
+```
+
+<Info>
+  Database and application containers are **not** directly accessible from outside the Docker network, improving security.
+</Info>
+
+## Security Configuration
+
+### Change Default Credentials
+
+Before exposing to the internet:
+
+1. Edit `deploy.sh` and set a strong `DB_PASS`:
+
+```bash deploy.sh
+export DB_PASS="your-strong-password-here"
+```
+
+2. If already deployed, update the password:
+
+```bash
+# Update .env file
+vim .env
+
+# Update database password
+docker compose exec db psql -U moodle -c "ALTER USER moodle WITH PASSWORD 'new-password';"
+
+# Restart containers
+docker compose down
+docker compose up -d
+```
+
+### Update Moodle Config
+
+After changing database credentials, update `./html/config.php`:
+
+```php config.php
+$CFG->dbpass = 'new-password';
+```
+
+### Enable HTTPS
+
+For production deployments, configure SSL/HTTPS. See [SSL/HTTPS Configuration](/advanced/ssl-https) for details.
+
+## Moodle Configuration File
+
+After installation, Moodle creates `./html/config.php` with your settings:
+
+```php config.php
+$CFG->dbtype    = 'pgsql';
+$CFG->dblibrary = 'native';
+$CFG->dbhost    = 'db';
+$CFG->dbname    = 'moodle';
+$CFG->dbuser    = 'moodle';
+$CFG->dbpass    = 'moodle';
+$CFG->prefix    = 'mdl_';
+
+$CFG->wwwroot   = 'https://your-domain.com';
+$CFG->dataroot  = '/var/www/moodledata';
+```
+
+<Warning>
+  Never commit `config.php` to version control as it contains sensitive credentials.
+</Warning>
+
+## Verifying Configuration
+
+After configuration, verify everything is working:
+
+<Steps>
+  <Step title="Check container health">
+    ```bash
+    docker compose ps
+    ```
+    All containers should show "Up" status.
+  </Step>
+
+  <Step title="Test web access">
+    Access your site URL and verify the login page loads.
+  </Step>
+
+  <Step title="Check cron execution">
+    ```bash
+    docker compose logs cron --tail=50
+    ```
+    Should show cron task execution.
+  </Step>
+
+  <Step title="Verify PHP settings">
+    In Moodle:
+    1. **Site administration → Server → PHP info**
+    2. Verify memory_limit = 512M
+    3. Verify upload_max_filesize = 512M
+  </Step>
+
+  <Step title="Test file uploads">
+    Upload a test file to verify permissions are correct.
+  </Step>
+</Steps>
+
+## Next Steps
+
+With configuration complete:
+
+- Review [Operations](/operations/maintenance) for ongoing maintenance
+- Set up [Backup & Restore](/operations/backup-restore) procedures
+- Configure [Monitoring](/operations/monitoring) for production
+- Explore [Advanced Security](/advanced/security) hardening
+
+<Note>
+  Your Moodle installation is now ready for use. Consider setting up automated backups before adding production data.
+</Note>
