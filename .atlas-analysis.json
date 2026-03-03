@@ -1,0 +1,81 @@
+{
+  "projectType": "infrastructure",
+  "projectName": "ipMoodle",
+  "projectDescription": "Docker-based deployment solution for Moodle LMS with PostgreSQL, Nginx, and automated cron jobs",
+  "theme": "aspen",
+  "primaryColor": "#FF6B35",
+  "lightColor": "#FF8C61",
+  "darkColor": "#E55A2B",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting Started",
+        "pages": [
+          "introduction",
+          "quickstart"
+        ]
+      },
+      {
+        "group": "Deployment",
+        "pages": [
+          "deployment/prerequisites",
+          "deployment/installation",
+          "deployment/configuration"
+        ]
+      },
+      {
+        "group": "Architecture",
+        "pages": [
+          "architecture/overview",
+          "architecture/services",
+          "architecture/networking"
+        ]
+      },
+      {
+        "group": "Configuration",
+        "pages": [
+          "configuration/environment-variables",
+          "configuration/php-settings",
+          "configuration/nginx",
+          "configuration/database"
+        ]
+      },
+      {
+        "group": "Operations",
+        "pages": [
+          "operations/maintenance",
+          "operations/backup-restore",
+          "operations/monitoring",
+          "operations/troubleshooting"
+        ]
+      },
+      {
+        "group": "Advanced",
+        "pages": [
+          "advanced/custom-php-extensions",
+          "advanced/ssl-https",
+          "advanced/scaling",
+          "advanced/security"
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "One-command deployment script for quick setup",
+    "Optimized PHP 8.2-FPM Alpine image with Moodle-specific extensions",
+    "PostgreSQL 16 database with persistent storage",
+    "Nginx reverse proxy with FastCGI configuration",
+    "Automated cron job execution for Moodle maintenance tasks",
+    "Pre-configured PHP settings optimized for Moodle (512M memory, large uploads)",
+    "Docker Compose orchestration with service dependencies",
+    "Automatic Moodle 4.3 download and installation"
+  ],
+  "publicApiSurface": [
+    "deploy.sh - Main deployment script",
+    "docker-compose.yml - Service orchestration (db, app, cron, web)",
+    "Dockerfile - Custom PHP-FPM image with extensions",
+    "nginx/Default.conf - Web server configuration",
+    "Environment variables: SITE_URL, DB_NAME, DB_USER, DB_PASS",
+    "Volume mounts: ./html (Moodle code), ./moodledata (uploads), ./db_data (PostgreSQL)"
+  ]
+}
